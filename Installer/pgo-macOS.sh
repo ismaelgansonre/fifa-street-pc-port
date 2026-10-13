@@ -53,7 +53,7 @@ usage() {
 Typical full run (~15 min per rebuild on M1 Pro, -j8):
   1) ./Installer/pgo-macOS.sh instrument
   2) cd "$BUILD"
-     LLVM_PROFILE_FILE=/tmp/fifastreet-%m.profraw ./fifastreet
+     LLVM_PROFILE_FILE=/tmp/fifastreet-ctest%c.profraw ./fifastreet
      # play ~5-10 min of representative gameplay (menus -> a match -> skills)
      # quit the game NORMALLY (profraw is written at exit)
   3) ./Installer/pgo-macOS.sh merge
@@ -142,7 +142,7 @@ cmd_instrument() {
   done
   [ "$hits" -eq 0 ] && { log "FATAL: nothing was instrumented"; exit 22; }
   log "=== PHASE 1 DONE === Next: run the game with"
-  log "  LLVM_PROFILE_FILE=/tmp/fifastreet-%m.profraw ./fifastreet"
+  log "  LLVM_PROFILE_FILE=/tmp/fifastreet-ctest%c.profraw ./fifastreet"
   log "play representative gameplay, then quit NORMALLY, then: $0 merge"
 }
 
