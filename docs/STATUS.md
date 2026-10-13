@@ -72,7 +72,7 @@ Tested and working on that date:
 
 Known issues on macOS (not present on Windows):
 
-- **Startup is a coin flip (~50% of launches).** A guest thread reads a manager object before its constructor has run and spins on null-pointer reads (`Unhandled guest access violation: read of guest 0x4`, thousands per second, ~100 MB of log). The rest of the game, including rendering and audio, keeps running, but that launch should be closed and retried. Root cause identified by sampling: `sub_82050728` dereferences the first field of an object passed by a virtual call from the module-init path (`sub_82105838`) before initialization.
+- **Startup is a coin flip (~20-50% of launches).** A guest thread reads a manager object before its constructor has run and spins on null-pointer reads (`Unhandled guest access violation: read of guest 0x4`). The rest of the game, including rendering and audio, keeps running, but that launch should be closed and retried. Root cause identified by sampling: `sub_82050728` dereferences the first field of an object passed by a virtual call from the module-init path (`sub_82105838`) before initialization. The runtime rate-limits the log to one line per second with a hit counter (measured: 229,087 suppressed hits in one second on a storming launch), so the flood costs little beyond the spinning core until the ordering fix lands.
 - **Fullscreen presents black.** Use `fullscreen = false` in `fifastreet.toml` (windowed) — windowed rendering is verified. `render_target_path_vulkan = "fsi"` is set in the tested configuration; the default host-render-targets path was not verified separately.
 
 ## Development method

@@ -12,6 +12,9 @@
 # 5) dynlib_posix.cpp: retry dlopen beside the executable with the platform
 #    suffix and the CMake "lib" prefix, matching Windows LoadLibrary search
 #    for extension-less module names (recompiled guests register without).
+# 6) xmemory.cpp: rate-limit the unhandled-access-violation log to the
+#    first hit per thread plus one line per second with a hit counter; a
+#    guest loop spinning on a bad pointer emitted hundreds of MB of log.
 #
 --- a/src/ui/game_ui_fonts.cpp
 +++ b/src/ui/game_ui_fonts.cpp
@@ -132,3 +135,159 @@ index fcfd6c9..5c5b492 100644
    return handle_ != nullptr;
  }
  
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 76cc877..00dbec0 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cstring>
+ #include <utility>
+ 
+@@ -543,10 +544,24 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
+   uint32_t virtual_address = HostToGuestVirtual(host_address);
+   BaseHeap* heap = LookupHeap(virtual_address);
+   if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) {
+-    REXSYS_ERROR(
+-        "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
+-        is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+-        rex::thread::current_thread_id());
++    // A guest loop spinning on a not-yet-initialized pointer faults on the
++    // same address thousands of times per second; logging every hit floods
++    // the log (hundreds of MB) and burns CPU on formatting and file flushes.
++    // Report the first hit per thread, then one line per second with a total.
++    static thread_local uint32_t unhandled_violation_count = 0;
++    static thread_local uint64_t last_unhandled_report_ns = 0;
++    const uint64_t now_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count());
++    ++unhandled_violation_count;
++    if (last_unhandled_report_ns == 0 || now_ns - last_unhandled_report_ns >= 1000000000ull) {
++      REXSYS_ERROR(
++          "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}"
++          " ({} hits{})",
++          is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
++          rex::thread::current_thread_id(), unhandled_violation_count,
++          last_unhandled_report_ns == 0 ? "" : ", suppressed repeats");
++      last_unhandled_report_ns = now_ns;
++    }
+     return false;
+   }
+ 
+@@ -784,24 +799,58 @@ bool Memory::Restore(stream::ByteStream* stream) {
+ // Recompiled Code Function Table
+ //=============================================================================
+ 
+-bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uint32_t image_base,
++bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size,
++                                     uint32_t image_base,
+                                      uint32_t image_size) {
+-  constexpr uint32_t kThunkReserveSize = runtime::FunctionDispatcher::kThunkReserveSize;
+-  uint32_t table_base = image_base + image_size;
++  constexpr uint32_t kThunkReserveSize =
++      runtime::FunctionDispatcher::kThunkReserveSize;
++
+   uint32_t table_size = (code_size + kThunkReserveSize) * 2;
++  uint32_t table_base = 0;
++
++  // FIFA Street fifadllzf.xex.dll.
++  // Generated indirect calls expect this module's function table
++  // immediately after the original XEX image.
++  if (code_base == 0x82610000) {
++    table_base = image_base + image_size;
++
++    REXSYS_DEBUG(
++        "FIFA_TABLE_FIX: forcing DLL function table at {:08X}",
++        table_base);
++
++    if (!heaps_.v80000000.AllocFixed(
++            table_base, table_size, 0x10000,
++            memory::kMemoryAllocationReserve |
++                memory::kMemoryAllocationCommit,
++            memory::kMemoryProtectRead |
++                memory::kMemoryProtectWrite)) {
++      REXSYS_ERROR(
++          "FIFA_TABLE_FIX: failed to allocate table at {:08X}",
++          table_base);
++      return false;
++    }
++  } else {
++    // Other modules use dynamically allocated function tables so they
++    // cannot overlap subsequent XEX images.
++    if (!heaps_.v80000000.Alloc(
++            table_size, 0x10000,
++            memory::kMemoryAllocationReserve |
++                memory::kMemoryAllocationCommit,
++            memory::kMemoryProtectRead |
++                memory::kMemoryProtectWrite,
++            true, &table_base)) {
++      REXSYS_ERROR(
++          "Failed to allocate function table, size {:08X}",
++          table_size);
++      return false;
++    }
++  }
+ 
+   REXSYS_DEBUG(
+       "Initializing function table at {:08X}, size {:08X} for code {:08X}-{:08X} "
+       "(+{:08X} thunk reserve)",
+-      table_base, table_size, code_base, code_base + code_size, kThunkReserveSize);
+-
+-  if (!heaps_.v80000000.AllocFixed(
+-          table_base, table_size, 0x10000,
+-          memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
+-          memory::kMemoryProtectRead | memory::kMemoryProtectWrite)) {
+-    REXSYS_ERROR("Failed to allocate function table at {:08X}", table_base);
+-    return false;
+-  }
++      table_base, table_size, code_base, code_base + code_size,
++      kThunkReserveSize);
+ 
+   Zero(table_base, table_size);
+ 
+@@ -821,28 +870,38 @@ bool Memory::DestroyFunctionTable(uint32_t code_base) {
+   uint32_t table_size = 0;
+   uint32_t logged_code_base = 0;
+   uint32_t logged_code_size = 0;
++
+   {
+     std::lock_guard lock(function_tables_mutex_);
++
+     auto it = std::find_if(
+         function_tables_.begin(), function_tables_.end(),
+-        [code_base](const FunctionTableEntry& entry) { return entry.code_base == code_base; });
++        [code_base](const FunctionTableEntry& entry) {
++          return entry.code_base == code_base;
++        });
++
+     if (it == function_tables_.end()) {
+       return false;
+     }
++
+     table_base = it->table_base;
+-    table_size = (it->code_size + it->thunk_reserve) * 2;
++    table_size =
++        (it->code_size + it->thunk_reserve) * 2;
+     logged_code_base = it->code_base;
+     logged_code_size = it->code_size;
++
+     function_tables_.erase(it);
+   }
+ 
+-  REXSYS_DEBUG("Destroying function table at {:08X}, size {:08X} for code {:08X}-{:08X}",
+-               table_base, table_size, logged_code_base, logged_code_base + logged_code_size);
++  REXSYS_DEBUG(
++      "Destroying function table at {:08X}, size {:08X} for code {:08X}-{:08X}",
++      table_base, table_size,
++      logged_code_base,
++      logged_code_base + logged_code_size);
+ 
+   heaps_.v80000000.Release(table_base);
+   return true;
+ }
+-
+ bool Memory::SetFunction(uint32_t guest_address, PPCFunc* host_function) {
+   uint32_t table_address = 0;
+   {
