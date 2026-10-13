@@ -51,3 +51,18 @@ Desktop.ini
 *.orig
 __pycache__/
 *.pyc
+
+# Local agent workspace (skills, personal agent files) - never commit
+.agents/
+.openclaw/
+.claude/
+.DS_Store
+AGENTS.md
+SOUL.md
+USER.md
+TOOLS.md
+HEARTBEAT.md
+IDENTITY.md
+memory/
+agent/
+skills-lock.json
