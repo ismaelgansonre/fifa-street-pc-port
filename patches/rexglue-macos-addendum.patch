@@ -17,6 +17,9 @@
 #    faulting thread briefly with the global lock released when it refaults
 #    on the same address, letting an outraced initialization land so the
 #    guest thread self-heals instead of spinning on a core.
+# 7) rex_app.cpp: flush the LLVM PGO profile before the intentional _Exit
+#    hard exit (weak symbol, no-op in non-instrumented builds) - without
+#    this, PGO profile sessions never write their .profraw files.
 #
 --- a/src/ui/game_ui_fonts.cpp
 +++ b/src/ui/game_ui_fonts.cpp
@@ -315,3 +318,58 @@ index 76cc877..ccacd24 100644
  bool Memory::SetFunction(uint32_t guest_address, PPCFunc* host_function) {
    uint32_t table_address = 0;
    {
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index b94fe9e..84dbe0f 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -20,6 +20,7 @@
+ #include <rex/filesystem.h>
+ #include <rex/logging/sink.h>
+ #include <rex/logging.h>
++#include <rex/ui/guide_font.h>
+ #include <rex/ui/overlay/achievement_toast.h>
+ #include <rex/ui/overlay/achievements_overlay.h>
+ #include <rex/ui/overlay/console_overlay.h>
+@@ -53,6 +54,12 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+ 
+ namespace rex {
+ 
++// Weak: only defined in PGO-instrumented builds. The hard exit below uses
++// _Exit, which skips the atexit hook the profile runtime normally uses to
++// dump its counters; without this explicit flush an instrumented build
++// would never write its .profraw files.
++extern "C" __attribute__((weak)) void __llvm_profile_write_file(void);
++
+ // --- ReXApp ---
+ 
+ ReXApp::~ReXApp() = default;
+@@ -384,6 +391,10 @@ bool ReXApp::SetupPresentation() {
+   return true;
+ }
+ 
++void ReXApp::OnConfigureFonts(ImFontAtlas* atlas) {
++  (void)atlas;  // the game's UI fonts are loaded by the ImGui drawer itself
++}
++
+ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDrawer* drawer) {
+   imgui_drawer_ = std::make_unique<rex::ui::ImGuiDrawer>(
+       window_.get(), 64, [this](ImFontAtlas* atlas) { OnConfigureFonts(atlas); },
+@@ -394,7 +405,7 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+   // gated eager font upload in SetImmediateDrawer is skipped (font uploads
+   // lazily on the first Draw instead).
+   imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
+-  rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
++  rex::ui::RegisterBind("bind_debug_overlay", "Home", "Toggle statistics view", [this] {
+     if (debug_overlay_) {
+       debug_overlay_.reset();
+     } else {
+@@ -508,6 +519,9 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
+   // reclaims the rest.
+   REXLOG_INFO("Title terminated; hard-exiting process.");
+   rex::FlushLogging();
++  if (__llvm_profile_write_file) {
++    __llvm_profile_write_file();
++  }
+   std::_Exit(0);
+ }
+ 
