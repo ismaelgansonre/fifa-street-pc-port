@@ -14,7 +14,7 @@
 #                      fifadllzf.xex.dll and the FootballCompEng DLC module.
 #                      Required on the first run; remembered in the workspace
 #                      afterwards.
-#   --jobs <N>         Parallel compile jobs (default 6).
+#   --jobs <N>         Parallel compile jobs (default: min(hw.ncpu, 8)).
 #   --smoke-test       After a successful build, run the game for ~45 s and
 #                      capture a screenshot under dist/mac-build/logs/.
 #   --help             Show this help.
@@ -41,7 +41,11 @@ LOCK="$WORK/.macbuild.lock"
 SDK="$REPO/ReXGlue"
 
 GAMEDATA=""
-JOBS=6
+# Parallel compile jobs: min(hw.ncpu, 8). This M1 Pro reports 8 logical cores
+# (6P+2E); compiles measure ~400 MB peak RSS each and only the serial link is
+# memory-heavy, so 8 jobs fit comfortably in 16 GB.
+JOBS=$(sysctl -n hw.ncpu 2>/dev/null || echo 6)
+[ "$JOBS" -gt 8 ] && JOBS=8
 SMOKE=0
 
 usage() {
@@ -56,7 +60,7 @@ Options:
                      fifadllzf.xex.dll and the FootballCompEng DLC module.
                      Required on the first run; remembered in the workspace
                      afterwards.
-  --jobs <N>         Parallel compile jobs (default 6).
+  --jobs <N>         Parallel compile jobs (default: min(hw.ncpu, 8)).
   --smoke-test       After a successful build, run the game for ~45 s and
                      capture a screenshot under dist/mac-build/logs/.
   --help             Show this help.
@@ -103,6 +107,18 @@ for tool in git cmake ninja clang++; do
 done
 log "cmake: $(cmake --version | head -1)"
 log "clang: $(/usr/bin/clang --version 2>/dev/null | head -1 || clang++ --version | head -1)"
+
+# Compiler cache: CMake initializes CMAKE_<LANG>_COMPILER_LAUNCHER from these
+# env vars. Guarded so the script keeps working without ccache. Requires
+# ~/.config/ccache/ccache.conf with sloppiness = pch_defines,time_macros (the
+# project compiles every TU with -include-pch). Revert: delete this block and
+# reconfigure once with -UCMAKE_C_COMPILER_LAUNCHER
+# -UCMAKE_CXX_COMPILER_LAUNCHER (the value persists in CMakeCache.txt).
+if command -v ccache >/dev/null 2>&1; then
+  export CMAKE_C_COMPILER_LAUNCHER=ccache
+  export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+  log "ccache: $(ccache --version | head -1)"
+fi
 
 # GameData: from the flag, else remembered, else the usual CrossOver location.
 if [ -z "$GAMEDATA" ] && [ -f "$PROJ/fifastreet_manifest.toml" ]; then
