@@ -17,9 +17,10 @@
 #    faulting thread briefly with the global lock released when it refaults
 #    on the same address, letting an outraced initialization land so the
 #    guest thread self-heals instead of spinning on a core.
-# 7) rex_app.cpp: flush the LLVM PGO profile before the intentional _Exit
-#    hard exit (weak symbol, no-op in non-instrumented builds) - without
-#    this, PGO profile sessions never write their .profraw files.
+# 7) rex_app.cpp: best-effort PGO profile flush on the intentional _Exit
+#    hard exit, resolved via dlsym (no-op in non-instrumented builds); the
+#    primary capture path is LLVM continuous mode (%c), which writes
+#    counters live and covers every instrumented module.
 #
 --- a/src/ui/game_ui_fonts.cpp
 +++ b/src/ui/game_ui_fonts.cpp
@@ -319,10 +320,19 @@ index 76cc877..ccacd24 100644
    uint32_t table_address = 0;
    {
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..84dbe0f 100644
+index b94fe9e..15871bc 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
-@@ -20,6 +20,7 @@
+@@ -13,6 +13,8 @@
+ 
+ #include <cstdlib>
+ 
++#include <dlfcn.h>
++
+ #include <rex/assert.h>
+ #include <rex/cvar.h>
+ #include <rex/ui/flags.h>
+@@ -20,6 +22,7 @@
  #include <rex/filesystem.h>
  #include <rex/logging/sink.h>
  #include <rex/logging.h>
@@ -330,20 +340,17 @@ index b94fe9e..84dbe0f 100644
  #include <rex/ui/overlay/achievement_toast.h>
  #include <rex/ui/overlay/achievements_overlay.h>
  #include <rex/ui/overlay/console_overlay.h>
-@@ -53,6 +54,12 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+@@ -53,6 +56,9 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
  
  namespace rex {
  
-+// Weak: only defined in PGO-instrumented builds. The hard exit below uses
-+// _Exit, which skips the atexit hook the profile runtime normally uses to
-+// dump its counters; without this explicit flush an instrumented build
-+// would never write its .profraw files.
-+extern "C" __attribute__((weak)) void __llvm_profile_write_file(void);
++// PGO profile flush (see OnClosing): resolved at runtime via dlsym so that
++// non-instrumented builds never reference the symbol at link time.
 +
  // --- ReXApp ---
  
  ReXApp::~ReXApp() = default;
-@@ -384,6 +391,10 @@ bool ReXApp::SetupPresentation() {
+@@ -384,6 +390,10 @@ bool ReXApp::SetupPresentation() {
    return true;
  }
  
@@ -354,7 +361,7 @@ index b94fe9e..84dbe0f 100644
  void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDrawer* drawer) {
    imgui_drawer_ = std::make_unique<rex::ui::ImGuiDrawer>(
        window_.get(), 64, [this](ImFontAtlas* atlas) { OnConfigureFonts(atlas); },
-@@ -394,7 +405,7 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+@@ -394,7 +404,7 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
    // gated eager font upload in SetImmediateDrawer is skipped (font uploads
    // lazily on the first Draw instead).
    imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
@@ -363,12 +370,30 @@ index b94fe9e..84dbe0f 100644
      if (debug_overlay_) {
        debug_overlay_.reset();
      } else {
-@@ -508,6 +519,9 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
+@@ -508,6 +518,27 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
    // reclaims the rest.
    REXLOG_INFO("Title terminated; hard-exiting process.");
    rex::FlushLogging();
-+  if (__llvm_profile_write_file) {
-+    __llvm_profile_write_file();
++  // PGO profile flush: only finds symbols in PGO-instrumented builds (dlsym
++  // returns null otherwise). The primary capture path is LLVM continuous
++  // mode (LLVM_PROFILE_FILE with %c), which writes counters live; this
++  // per-image flush is the fallback for classic %m profiles, where _Exit
++  // would otherwise skip every atexit dump. RTLD_DEFAULT covers this
++  // executable; the guest modules and the runtime hold their own counters
++  // and writers.
++  using ProfileWriteFn = void (*)(void);
++  if (auto write = reinterpret_cast<ProfileWriteFn>(dlsym(RTLD_DEFAULT, "__llvm_profile_write_file"))) {
++    write();
++  }
++  for (const char* image : {"libfifastreet_fifadllzf_xex.dylib",
++                            "libfifastreet_FootballCompEngzf_xex.dylib",
++                            "librexruntime.dylib"}) {
++    if (void* handle = dlopen(image, RTLD_NOLOAD | RTLD_LAZY)) {
++      if (auto write = reinterpret_cast<ProfileWriteFn>(dlsym(handle, "__llvm_profile_write_file"))) {
++        write();
++      }
++      dlclose(handle);
++    }
 +  }
    std::_Exit(0);
  }
