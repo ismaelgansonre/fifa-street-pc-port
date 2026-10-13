@@ -12,9 +12,11 @@
 # 5) dynlib_posix.cpp: retry dlopen beside the executable with the platform
 #    suffix and the CMake "lib" prefix, matching Windows LoadLibrary search
 #    for extension-less module names (recompiled guests register without).
-# 6) xmemory.cpp: rate-limit the unhandled-access-violation log to the
-#    first hit per thread plus one line per second with a hit counter; a
-#    guest loop spinning on a bad pointer emitted hundreds of MB of log.
+# 6) xmemory.cpp: rate-limit the unhandled-access-violation log (first hit
+#    per thread, then one line per second with a hit counter) and park the
+#    faulting thread briefly with the global lock released when it refaults
+#    on the same address, letting an outraced initialization land so the
+#    guest thread self-heals instead of spinning on a core.
 #
 --- a/src/ui/game_ui_fonts.cpp
 +++ b/src/ui/game_ui_fonts.cpp
@@ -136,7 +138,7 @@ index fcfd6c9..5c5b492 100644
  }
  
 diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
-index 76cc877..00dbec0 100644
+index 76cc877..ccacd24 100644
 --- a/src/system/xmemory.cpp
 +++ b/src/system/xmemory.cpp
 @@ -10,6 +10,7 @@
@@ -147,7 +149,15 @@ index 76cc877..00dbec0 100644
  #include <cstring>
  #include <utility>
  
-@@ -543,10 +544,24 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
+@@ -29,6 +30,7 @@
+ #include <rex/system/mmio_handler.h>
+ #include <rex/system/xmemory.h>
+ #include <rex/thread.h>
++#include <rex/thread.h>
+ 
+ // TODO(benvanik): move xbox.h out
+ #include <rex/system/xtypes.h>
+@@ -543,10 +545,38 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
    uint32_t virtual_address = HostToGuestVirtual(host_address);
    BaseHeap* heap = LookupHeap(virtual_address);
    if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) {
@@ -173,10 +183,24 @@ index 76cc877..00dbec0 100644
 +          last_unhandled_report_ns == 0 ? "" : ", suppressed repeats");
 +      last_unhandled_report_ns = now_ns;
 +    }
++    if (unhandled_violation_count > 1) {
++      // The same thread refaulted on the same missing address: a guest thread
++      // has outraced initialization that writes this address - for example a
++      // task object whose dispatch-table pointer a static constructor writes
++      // on the creating thread just after spawn (ExCreateThread resumes the
++      // created thread immediately; Apple Silicon schedules it on another
++      // core before the creator reaches the write). Park briefly with the
++      // global lock released so the creator's init can land; the retried
++      // load then succeeds and the thread self-heals instead of burning a
++      // core in a fault loop.
++      global_lock_locked_once.unlock();
++      rex::thread::Sleep(std::chrono::microseconds(500));
++      global_lock_locked_once.lock();
++    }
      return false;
    }
  
-@@ -784,24 +799,58 @@ bool Memory::Restore(stream::ByteStream* stream) {
+@@ -784,24 +814,58 @@ bool Memory::Restore(stream::ByteStream* stream) {
  // Recompiled Code Function Table
  //=============================================================================
  
@@ -247,7 +271,7 @@ index 76cc877..00dbec0 100644
  
    Zero(table_base, table_size);
  
-@@ -821,28 +870,38 @@ bool Memory::DestroyFunctionTable(uint32_t code_base) {
+@@ -821,28 +885,38 @@ bool Memory::DestroyFunctionTable(uint32_t code_base) {
    uint32_t table_size = 0;
    uint32_t logged_code_base = 0;
    uint32_t logged_code_size = 0;

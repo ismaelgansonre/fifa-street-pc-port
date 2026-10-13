@@ -97,3 +97,16 @@ if(APPLE)
         PROPERTIES COMPILE_OPTIONS "-O1;-g0")
 endif()
 # END MACOS-PORT-O1-MEGA-TU
+
+# APPLE-GUEST-TUNING (Apple Silicon only)
+# The guest hot path otherwise compiles for generic armv8-a. Apple scheduling
+# plus -O3 help the recompiled PowerPC code on Apple Silicon (measured on the
+# FIFA Street port, 2026-10-13). Later flags win, so -O3 here overrides the
+# target-level -O2 above; guest FP semantics stay IEEE (no unsafe math).
+if(APPLE)
+    foreach(_rex_guest_target fifastreet_recomp fifastreet_fifadllzf_xex fifastreet_FootballCompEngzf_xex)
+        if(TARGET ${_rex_guest_target})
+            target_compile_options(${_rex_guest_target} PRIVATE -mcpu=apple-m1 -O3)
+        endif()
+    endforeach()
+endif()
