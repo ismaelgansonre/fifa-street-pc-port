@@ -10,6 +10,10 @@ Direct3D 12 runtime/GPU pair and dependencies. It does not require `Installer/sd
 or the release DLL hashes. Without a bundled SDK, this source mode is also selected
 automatically. The bundled installer path retains its release integrity checks.
 
+For macOS (Apple Silicon) source builds, use `BuildFifaStreet-macOS.sh` instead;
+see the [macOS section](../docs/BUILDING.md#macos-apple-silicon-experimental) of
+the build guide.
+
 The GUI validates the ISO, copies extracted data, applies the start-screen/main-menu credits, then recompiles the main executable and the required guest modules.
 
 The current pipeline builds:

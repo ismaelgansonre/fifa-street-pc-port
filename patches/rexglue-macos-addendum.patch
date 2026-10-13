@@ -1,0 +1,134 @@
+# ReStreet macOS addendum for ReXGlue (revisions c94f5ebd / v0.10.0).
+# Apply AFTER patches/rexglue-local-changes.patch:
+#   git -C ReXGlue apply ../patches/rexglue-macos-addendum.patch
+#
+# 1) game_ui_fonts.cpp: use fseeko instead of _fseeki64 off Windows.
+# 2) xboxkrnl_rtl.cpp: guard immintrin.h/_mm_pause behind x86-64.
+# 3) register_cpp.inja: compiler barrier per registered function so the
+#    recompiled-module registration TUs stay linear-time in the C++
+#    backend (GNU compilers only; MSVC unchanged).
+# 4) rexglue_helpers.cmake: resolve the MoltenVK ICD from the helpers' own
+#    directory; REXGLUE_ROOT is undefined under find_package consumption.
+# 5) dynlib_posix.cpp: retry dlopen beside the executable with the platform
+#    suffix and the CMake "lib" prefix, matching Windows LoadLibrary search
+#    for extension-less module names (recompiled guests register without).
+#
+--- a/src/ui/game_ui_fonts.cpp
++++ b/src/ui/game_ui_fonts.cpp
+@@ -36,7 +36,11 @@
+ uint16_t Be16(const uint8_t* p) { return uint16_t((p[0] << 8) | p[1]); }
+ 
+ bool ReadAt(FILE* file, uint64_t offset, void* out, size_t size) {
++#if defined(_WIN32)
+   if (_fseeki64(file, static_cast<long long>(offset), SEEK_SET) != 0) return false;
++#else
++  if (fseeko(file, static_cast<off_t>(offset), SEEK_SET) != 0) return false;
++#endif
+   return std::fread(out, 1, size, file) == size;
+ }
+ 
+
+--- a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
+@@ -13,7 +13,9 @@
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
+ #include <algorithm>
++#if defined(__x86_64__) || defined(_M_X64)
+ #include <immintrin.h>
++#endif
+ #include <string>
+ 
+ #include <rex/chrono/chrono_steady_cast.h>
+@@ -399,7 +401,9 @@
+       cs->recursion_count = 1;
+       return;
+     }
++#if defined(__x86_64__) || defined(_M_X64)
+     _mm_pause();
++#endif
+   }
+ 
+   if (rex::thread::atomic_inc(&cs->lock_count) != 0) {
+
+diff --git a/cmake/rexglue_helpers.cmake b/cmake/rexglue_helpers.cmake
+index 41e6dce..d3d414b 100644
+--- a/cmake/rexglue_helpers.cmake
++++ b/cmake/rexglue_helpers.cmake
+@@ -8,11 +8,18 @@
+ #==========================================================
+ include_guard(GLOBAL)
+ 
++# Directory of this file, captured at include time: inside a function,
++# CMAKE_CURRENT_LIST_DIR follows the caller's list file instead.
++set(_REXGLUE_HELPERS_DIR "${CMAKE_CURRENT_LIST_DIR}" CACHE INTERNAL "rexglue helpers dir")
++
+ function(_rexglue_stage_macos_vulkan_runtime target_name)
+     if(TARGET Vulkan::Loader AND TARGET MoltenVK::MoltenVK)
+         set(_rexglue_vulkan_loader Vulkan::Loader)
+         set(_rexglue_moltenvk MoltenVK::MoltenVK)
+-        set(_rexglue_moltenvk_icd "${REXGLUE_ROOT}/cmake/MoltenVK_icd.json")
++        # Resolved from the helpers' own directory (_REXGLUE_HELPERS_DIR, see
++        # above): REXGLUE_ROOT is only set via add_subdirectory consumption, and
++        # the build-tree config points at the install layout, not the source.
++        set(_rexglue_moltenvk_icd "${_REXGLUE_HELPERS_DIR}/MoltenVK_icd.json")
+     elseif(TARGET rex::vulkan-loader AND TARGET rex::moltenvk)
+         set(_rexglue_vulkan_loader rex::vulkan-loader)
+         set(_rexglue_moltenvk rex::moltenvk)
+diff --git a/resources/templates/codegen/register_cpp.inja b/resources/templates/codegen/register_cpp.inja
+index 0be31c4..b88bc51 100644
+--- a/resources/templates/codegen/register_cpp.inja
++++ b/resources/templates/codegen/register_cpp.inja
+@@ -18,6 +18,12 @@ void ReXModule_Register(rex::runtime::IModuleRegistrar* registrar) {
+ void {{ project }}_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) {
+ {% endif %}
+ {% for fn in functions %}{% if not fn.below_code_base or fn.is_import %}  registrar->SetFunction({{ fn.address }}, {{ fn.name }});
++#if defined(__GNUC__)
++  // One tiny basic block per registration keeps the C++ backends linear-time
++  // on this ~150k-call function; a single giant block spends 60+ minutes in
++  // GlobalISel/SelectionDAG on Apple Silicon. MSVC builds keep the plain loop.
++  asm volatile("" ::: "memory");
++#endif
+ {% endif %}{% endfor %}}
+ 
+ {% if is_dll %}
+diff --git a/src/core/dynlib_posix.cpp b/src/core/dynlib_posix.cpp
+index fcfd6c9..5c5b492 100644
+--- a/src/core/dynlib_posix.cpp
++++ b/src/core/dynlib_posix.cpp
+@@ -1,5 +1,6 @@
+ #include <rex/platform.h>
+ #include <rex/platform/dynlib.h>
++#include <rex/filesystem.h>
+ 
+ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
+ 
+@@ -28,6 +29,28 @@ bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution mo
+   Close();
+   int flags = (mode == SymbolResolution::kImmediate) ? RTLD_NOW : RTLD_LAZY;
+   handle_ = dlopen(path.c_str(), flags);
++  if (!handle_ && path.is_relative()) {
++    // Windows LoadLibrary appends ".dll" and searches the executable folder
++    // for extension-less module names; dlopen does neither. Recompiled module
++    // registrations rely on that behavior, so retry beside the executable with
++    // the platform suffix, both unprefixed and with the "lib" prefix CMake
++    // gives module libraries on this platform.
++    std::filesystem::path candidate = path;
++    if (!candidate.has_extension()) {
++#if defined(__APPLE__)
++      candidate.replace_extension(".dylib");
++#else
++      candidate.replace_extension(".so");
++#endif
++    }
++    const auto exe_dir = rex::filesystem::GetExecutableFolder();
++    handle_ = dlopen((exe_dir / candidate).c_str(), flags);
++    if (!handle_) {
++      std::filesystem::path lib_prefixed =
++          candidate.parent_path() / ("lib" + candidate.filename().string());
++      handle_ = dlopen((exe_dir / lib_prefixed).c_str(), flags);
++    }
++  }
+   return handle_ != nullptr;
+ }
+ 

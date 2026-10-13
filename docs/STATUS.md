@@ -61,6 +61,20 @@ Output resolution and internal rendering scale are independent. Internal resolut
 - The installer expands its details panel by 180 px, which does not fit on screens 768 px high or less.
 - Free-space requirements depend on extraction and temporary files.
 
+## macOS (Apple Silicon) port status
+
+First native boot achieved on **13 October 2026** on an M1 Pro (macOS 27, arm64, built from source with the SDK's Vulkan backend on MoltenVK). Build instructions are in [BUILDING.md](BUILDING.md).
+
+Tested and working on that date:
+
+- The game builds and boots to the title screen: logos, textures, fonts and the menu load render correctly in a window, with audio. The same state was previously seen under Wine/CrossOver.
+- All three recompiled outputs link, including the two guest modules; modules load and their guest code executes.
+
+Known issues on macOS (not present on Windows):
+
+- **Startup is a coin flip (~50% of launches).** A guest thread reads a manager object before its constructor has run and spins on null-pointer reads (`Unhandled guest access violation: read of guest 0x4`, thousands per second, ~100 MB of log). The rest of the game, including rendering and audio, keeps running, but that launch should be closed and retried. Root cause identified by sampling: `sub_82050728` dereferences the first field of an object passed by a virtual call from the module-init path (`sub_82105838`) before initialization.
+- **Fullscreen presents black.** Use `fullscreen = false` in `fifastreet.toml` (windowed) — windowed rendering is verified. `render_target_path_vulkan = "fsi"` is set in the tested configuration; the default host-render-targets path was not verified separately.
+
 ## Development method
 
 SamuelitoDaVila directed and tested the project with AI assistance from ChatGPT, OpenAI Codex and Anthropic's Claude (Claude Code). The statements above separate what was actually tested from what still needs broader coverage.

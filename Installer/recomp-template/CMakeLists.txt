@@ -71,3 +71,29 @@ if(TARGET fifastreet_FootballCompEngzf_xex)
         target_compile_options(fifastreet_FootballCompEngzf_xex PRIVATE -O2)
     endif()
 endif()
+
+# MACOS-PORT-O1-MEGA-TU (auto-added by the macOS port effort; safe to remove)
+# The generated function-registration units defeat Apple clang's default
+# backend choices, in two different ways:
+# - register.cpp (one per module) calls registrar->SetFunction once per guest
+#   function. Codegen barriers (see patches/rexglue-macos-addendum.patch) keep
+#   each call in its own basic block, but Apple clang still routes these TUs
+#   through GlobalISel, whose Localizer pass spends 15-60+ minutes (single
+#   core) on them. -fno-global-isel selects the regular SelectionDAG/FastISel
+#   path: seconds. The functions run once at module load, so this is purely a
+#   compile-time fix.
+# - the fifadllzf register TU is ~159k lines; it additionally compiles at
+#   -O0/-g0 and skips the PCH (the shared PCH is built optimized, and clang
+#   rejects it for an -O0 TU). The file only includes two small headers.
+# - init.cpp files are giant static data tables; -O1 compiles them in seconds.
+# Guest code (recomp.NNN files) and all other modules keep their normal
+# optimization.
+if(APPLE)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/generated/default/fifastreet_register.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fno-global-isel")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/generated/fifadllzf_xex/fifastreet_register.cpp"
+        PROPERTIES COMPILE_OPTIONS "-O0;-g0;-fno-global-isel" SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/generated/fifadllzf_xex/fifastreet_init.cpp"
+        PROPERTIES COMPILE_OPTIONS "-O1;-g0")
+endif()
+# END MACOS-PORT-O1-MEGA-TU

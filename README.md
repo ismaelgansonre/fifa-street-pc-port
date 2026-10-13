@@ -22,6 +22,8 @@ You need your own copy of the game: an Xbox 360 ISO of FIFA Street (2012). The I
 
 **v1.2 is offline only.** It has no online play.
 
+**macOS (Apple Silicon), experimental:** the game can also be built from source for native play, rendering through the SDK's Vulkan backend on MoltenVK. There is no macOS installer; see [Build from source](docs/BUILDING.md#macos-apple-silicon-experimental).
+
 ## What's new in v1.2
 
 - **Cutscenes and goal replays at your refresh rate**, no longer capped at 40 FPS.

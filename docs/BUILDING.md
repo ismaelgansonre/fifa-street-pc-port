@@ -101,6 +101,38 @@ build, not a clean Windows installation or new gameplay validation. The Vulkan
 installation helper is tested; a complete Vulkan source build has not been tested
 in this run.
 
+## macOS (Apple Silicon, experimental)
+
+The game also builds and runs natively on Apple Silicon Macs. Rendering uses the
+SDK's Vulkan backend on top of MoltenVK (Metal under the hood); there is no
+native Metal backend. The launcher and graphical installer stay Windows-only —
+on macOS the build produces a standalone folder you start directly.
+
+Prerequisites: Xcode Command Line Tools, CMake 3.25+, Ninja and Git. Game data
+comes from your own extracted copy (for example an existing CrossOver bottle)
+containing `default.xex`, `fifadllzf.xex.dll` and the FootballCompEng DLC
+module.
+
+From the repository root:
+
+    ./Installer/BuildFifaStreet-macOS.sh --gamedata "<path to GameData>"
+
+The first run clones the pinned ReXGlue revision, applies the project patch and
+the macOS addendum (`patches/rexglue-macos-addendum.patch`), builds the SDK,
+generates the recompiled sources and compiles the game — 30 to 60 minutes.
+Re-running the same command resumes where it stopped. Do not delete
+`dist/mac-build/FifaStreetRex/out/build`; a wipe forces a full recompile.
+
+Outputs land in `dist/mac-build/FifaStreetRex/out/build/mac-arm64-release/`:
+`fifastreet`, the two guest module dylibs beside it, and a `runtime/` folder
+with `librexruntime.dylib`, `librexgpu-xenos.dylib`, the Vulkan loader and
+MoltenVK. Run `./fifastreet` from that folder. Add `--smoke-test` for a bounded
+45-second launch check with a screenshot under `dist/mac-build/logs/`.
+
+`--jobs N` changes compile parallelism (default 6). The generated function-registration files are handled automatically on Apple Silicon (compiler barriers per registered function plus `-fno-global-isel`; see the `MACOS-PORT-O1-MEGA-TU` block in `Installer/recomp-template/CMakeLists.txt` and `patches/rexglue-macos-addendum.patch`) — without them these files take over an hour each to compile.
+
+Current status and known macOS issues (startup race, fullscreen) are recorded in [STATUS.md](STATUS.md#macos-apple-silicon-port-status). Run windowed (`fullscreen = false` in `fifastreet.toml`): fullscreen presents black at the moment.
+
 ## Release packaging prerequisites
 
 - Windows x64, Git and the .NET 8 SDK with Windows desktop support.
