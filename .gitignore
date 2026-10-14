@@ -8,10 +8,8 @@ private/
 GameData/
 FIFASTREET/
 
-# Generated guest source; retain only the CMake scaffolding helper
+# Generated guest source (regenerated from ISO + manifest by codegen)
 **/generated/**
-!Installer/recomp-template/generated/
-!Installer/recomp-template/generated/rexglue.cmake
 
 # Local SDK/toolchain and build outputs
 ReXGlue/
@@ -66,6 +64,9 @@ IDENTITY.md
 memory/
 agent/
 skills-lock.json
+
+# PGO profile leftovers
+*.profraw
 
 # Beads / Dolt files (added by bd init)
 .dolt/
