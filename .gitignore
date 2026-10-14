@@ -77,3 +77,6 @@ skills-lock.json
 
 # Original Windows port by samuelit0davila - reference only
 windows-version/
+
+# Patched SDK source build tree (scripts/sdk-build-patched.sh)
+sdk-src/

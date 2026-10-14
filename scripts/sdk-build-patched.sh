@@ -1,0 +1,31 @@
+#!/bin/zsh
+# Build du SDK ReXGlue v0.10.0 (source officielle c94f5eb) + patch minimal
+# "image-overlap" (patches/rexglue-v0.10.0-image-overlap-fix.patch).
+# Le SDK téléchargé ReXGlue/ reste INTACT : ce build s'installe dans dist/sdk/.
+# Usage : zsh scripts/sdk-build-patched.sh
+# Journal : dist/logs/sdk-build.log
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$REPO/sdk-src"
+LOGDIR="$REPO/dist/logs"
+mkdir -p "$LOGDIR"
+cd "$SRC" || exit 1
+
+echo "=== [$(date +%H:%M:%S)] PHASE 1/4: sous-modules ==="
+git submodule update --init --recursive --depth 1 2>&1 | tail -5
+echo "submodules exit=$?"
+
+echo "=== [$(date +%H:%M:%S)] PHASE 2/4: patch overlap ==="
+git apply --check "$REPO/patches/rexglue-v0.10.0-image-overlap-fix.patch" 2>/dev/null && git apply "$REPO/patches/rexglue-v0.10.0-image-overlap-fix.patch" && echo "patch applique" || echo "patch deja applique ou invalide"
+git diff --stat | tail -2
+
+echo "=== [$(date +%H:%M:%S)] PHASE 3/4: build (preset mac-arm64, -j8) ==="
+cmake --preset mac-arm64 2>&1 | tail -6
+cmake --build out/build/mac-arm64 --parallel 8 2>&1 | tail -15
+_rc=$?
+echo "build exit=$_rc"
+if [ $_rc -ne 0 ]; then echo "ABORT: build SDK echoue"; exit 1; fi
+
+echo "=== [$(date +%H:%M:%S)] PHASE 4/4: install vers dist/sdk ==="
+cmake --install out/build/mac-arm64 --prefix "$REPO/dist/sdk" 2>&1 | tail -5
+echo "install exit=$?"
+ls "$REPO/dist/sdk/lib/" 2>/dev/null | head -8
