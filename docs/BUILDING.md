@@ -133,6 +133,42 @@ MoltenVK. Run `./fifastreet` from that folder. Add `--smoke-test` for a bounded
 
 Current status and known macOS issues (startup race, fullscreen) are recorded in [STATUS.md](STATUS.md#macos-apple-silicon-port-status). Run windowed (`fullscreen = false` in `fifastreet.toml`): fullscreen presents black at the moment.
 
+### Packaging for macOS (ReStreet.app, experimental)
+
+The Windows launcher and graphical installer are WinForms (`net8.0-windows`)
+and cannot run on macOS. Three scripts replace them (all runnable with
+`--help`); they are committed on this branch:
+
+- `Installer/Package-macOS.sh` — stages `dist/mac-dist/ReStreet.app` from an
+  existing build (no rebuild, no game data): `fifastreet` + guest `.dylib`
+  modules beside the executable (existing `@executable_path` rpaths keep
+  working), the `vulkan/` MoltenVK subtree, a macOS default `fifastreet.toml`
+  (`fsi`, fast readback with memexport, no occlusion queries, async shaders,
+  720p windowed), and the launcher as `CFBundleExecutable`. Binaries get an
+  ad-hoc signature; add `--dmg` for a distributable disk image.
+- `Installer/ReStreet-macOS.sh` — minimal launcher, also copied into the
+  bundle. Profiles `--profile balanced|quality|performance`, `--resolution
+  WxH`, `--fullscreen|--windowed`, `--vsync on|off`, `--readback
+  full|some|fast|none`, `--show-config`, `--dry-run`, `--save`. Settings are
+  passed as `--cvar=value` CLI overrides, which outrank the bundled toml, so
+  the bundle stays pristine (and signed). Double-clicking the app plays the
+  Balanced profile.
+- `Installer/Install-macOS.sh` — wires YOUR OWN copy to the app:
+  `--app <ReStreet.app>` with `--iso <file>` (needs an `extract-xiso`
+  binary at `Installer/tools/extract-xiso` or on PATH; build it from
+  [XboxDev/extract-xiso](https://github.com/XboxDev/extract-xiso)) or
+  `--gamedata <dir>`. Validates the three modules, stores the data at
+  `~/Library/Application Support/ReStreet/GameData` (`--copy` default,
+  `--link` to avoid duplication), symlinks it at `Contents/GameData` (found
+  by `OnConfigurePaths`), and re-signs ad-hoc. If Gatekeeper blocks the
+  first launch: `xattr -dr com.apple.quarantine ReStreet.app`.
+
+Typical flow after a successful source build:
+
+    ./Installer/Package-macOS.sh --dmg
+    ./Installer/Install-macOS.sh --app dist/mac-dist/ReStreet.app --gamedata "<path to GameData>"
+    open dist/mac-dist/ReStreet.app
+
 ## Release packaging prerequisites
 
 - Windows x64, Git and the .NET 8 SDK with Windows desktop support.

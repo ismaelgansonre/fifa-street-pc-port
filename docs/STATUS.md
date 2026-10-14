@@ -70,6 +70,13 @@ Tested and working on that date:
 - The game builds and boots to the title screen: logos, textures, fonts and the menu load render correctly in a window, with audio. The same state was previously seen under Wine/CrossOver.
 - All three recompiled outputs link, including the two guest modules; modules load and their guest code executes.
 
+Packaging (14 October 2026, branch `wiki-side`): `Installer/Package-macOS.sh`
+stages a working `ReStreet.app` (binary + guest dylibs + MoltenVK subtree,
+ad-hoc signed) with the launcher as `CFBundleExecutable`. Smoke-tested from
+the bundle on the same M1 Pro: process alive 28 s, MoltenVK 1.4.1 on Apple
+M1 Pro, swapchain created, GameData resolved via `Contents/GameData`. The
+Windows launcher/installer remain Windows-only by design (WinForms).
+
 Known issues on macOS (not present on Windows):
 
 - **Startup race (~20-50% of launches, macOS only).** A guest worker thread created before the game's static constructors have run dereferences the task object's dispatch-table pointer (`sub_82050728` reading `[obj+0]`, object `0x8217DD40`) while it is still null and faults in a loop — `read of guest 0x4`, measured up to 229,087 hits in one second while the rest of the game keeps running. Root cause: `ExCreateThread` resumes the created thread immediately (`xthread.cpp`) and Apple Silicon schedules it on another core before the creator writes the pointer; Windows always wins the race. Contained on two levels since 2026-10-13: the runtime logs the first hit per thread then one line per second with a hit counter, and parks the faulting thread (global lock released) so initialization lands and the thread self-heals. A console-faithful fix (queue guest-created threads until the creator's first yield) remains possible if the park ever proves insufficient.
