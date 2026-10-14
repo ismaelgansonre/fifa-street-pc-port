@@ -74,3 +74,6 @@ skills-lock.json
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Original Windows port by samuelit0davila - reference only
+windows-version/
