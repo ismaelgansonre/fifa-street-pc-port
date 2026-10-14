@@ -14,6 +14,7 @@ DYLD_LIBRARY_PATH="$PWD" ./fifastreet \
     --no-fullscreen \
     --resolution 1280x720 \
     --game_data_root "$REPO/dist/GameData" \
+    --writable_code_segments \
     --log_level debug \
     > "$LOGDIR/boot-console.log" 2>&1 &
 GPID=$!
