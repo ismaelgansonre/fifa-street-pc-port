@@ -120,6 +120,27 @@ if command -v ccache >/dev/null 2>&1; then
   log "ccache: $(ccache --version | head -1)"
 fi
 
+# ccache dir: keep it inside the build workspace. The default
+# (~/Library/Caches/ccache) is outside the sandbox used by automated runs
+# and every compilation fails there ("failed to create temporary file").
+CCACHE_DIR="$WORK/ccache"
+if [ ! -f "$CCACHE_DIR/stats" ] && [ -d "$HOME/Library/Caches/ccache" ]; then
+  mkdir -p "$CCACHE_DIR" && cp -R "$HOME/Library/Caches/ccache/." "$CCACHE_DIR/" \
+    && log "seeded ccache from $HOME/Library/Caches/ccache" || log "ccache seed failed, continuing"
+fi
+export CCACHE_DIR
+
+# CPM source cache: keep it inside the build workspace. The default
+# (~/.cache/CPM) is outside the sandbox used by automated runs, and CPM
+# takes a file lock (cmake.lock) on every configure, which fails there.
+# Seeded once from the existing cache; afterwards it is self-sustaining.
+CPM_CACHE_DIR="$WORK/cpm-cache"
+if [ ! -d "$CPM_CACHE_DIR/cpm" ] && [ -d "$HOME/.cache/CPM/cpm" ]; then
+  mkdir -p "$CPM_CACHE_DIR" && cp -R "$HOME/.cache/CPM/." "$CPM_CACHE_DIR/" \
+    && log "seeded CPM cache from $HOME/.cache/CPM" || log "CPM cache seed failed, continuing"
+fi
+export CPM_SOURCE_CACHE="$CPM_CACHE_DIR"
+
 # GameData: from the flag, else remembered, else the usual CrossOver location.
 if [ -z "$GAMEDATA" ] && [ -f "$PROJ/fifastreet_manifest.toml" ]; then
   GAMEDATA="$(sed -n 's/^game_root = "\(.*\)"$/\1/p' "$PROJ/fifastreet_manifest.toml")"
@@ -145,18 +166,27 @@ if ! git -C "$SDK" submodule status --recursive | grep -qv '^ '; then
   git -C "$SDK" submodule update --init --recursive >>"$LOG" 2>&1 || die "submodules failed"
 fi
 
-apply_patch() { # apply_patch <file> <label>
+apply_patch() { # apply_patch <file> <label>; returns 1 when neither direction applies
   local patch="$1" label="$2"
   if git -C "$SDK" apply --check "$patch" 2>>"$LOG"; then
     git -C "$SDK" apply "$patch" >>"$LOG" 2>&1 && log "$label applied" || die "$label failed to apply"
   elif git -C "$SDK" apply --check -R "$patch" 2>>"$LOG"; then
     log "$label already applied"
   else
-    die "$label does not apply (ReXGlue not at the pinned revision, or dirty tree?)"
+    return 1
   fi
 }
-apply_patch "$REPO/patches/rexglue-local-changes.patch" "project patch"
-apply_patch "$REPO/patches/rexglue-macos-addendum.patch" "macOS addendum"
+# The addendum overlaps the project patch (game_ui_fonts.cpp, xboxkrnl_rtl.cpp),
+# so once both are applied the project patch no longer reverse-checks. Detect
+# the fully-patched state via the addendum (applied last) instead.
+if git -C "$SDK" apply --check -R "$REPO/patches/rexglue-macos-addendum.patch" 2>>"$LOG"; then
+  log "project patch + macOS addendum already applied"
+else
+  apply_patch "$REPO/patches/rexglue-local-changes.patch" "project patch" \
+    || die "project patch does not apply (ReXGlue not at the pinned revision, or dirty tree?)"
+  apply_patch "$REPO/patches/rexglue-macos-addendum.patch" "macOS addendum" \
+    || die "macOS addendum does not apply (ReXGlue not at the pinned revision, or dirty tree?)"
+fi
 
 # --- Stage 2: build the SDK --------------------------------------------------
 # The game project lives inside this git repository, whose v1.x release tags
@@ -164,9 +194,24 @@ apply_patch "$REPO/patches/rexglue-macos-addendum.patch" "macOS addendum"
 # ignore the enclosing repository so the SDK keeps its dev version.
 export GIT_CEILING_DIRECTORIES="$WORK"
 
+# If the CPM cache moved since the last configure, stale INTERNAL cache
+# entries (CPM_DIRECTORY/CPM_FILE/*_SOURCE_DIR) make CPM return early
+# without defining CPMAddPackage ("Unknown CMake command"). Rewrite them.
+fix_stale_cpm_paths() { # fix_stale_cpm_paths <CMakeCache.txt>
+  local cache_file="$1"
+  [ -f "$cache_file" ] && grep -q "^CPM_DIRECTORY:INTERNAL=" "$cache_file" || return 0
+  local old_root
+  old_root="$(sed -n 's|^CPM_DIRECTORY:INTERNAL=\(.*\)/cpm$|\1|p' "$cache_file")"
+  if [ -n "$old_root" ] && [ "$old_root" != "$CPM_CACHE_DIR" ]; then
+    log "rewriting stale CPM cache paths ($old_root -> $CPM_CACHE_DIR)"
+    sed -i '' "s|$old_root|$CPM_CACHE_DIR|g" "$cache_file"
+  fi
+}
 log "=== Stage 2: SDK build (Vulkan backend, parallel $JOBS) ==="
+fix_stale_cpm_paths "$SDK/out/build/mac-arm64/CMakeCache.txt"
 cmake -S "$SDK" --preset mac-arm64 \
   -DREXGLUE_USE_VULKAN=ON -DREXGLUE_USE_D3D12=OFF \
+  -DCPM_SOURCE_CACHE="$CPM_CACHE_DIR" \
   -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 >>"$LOG" 2>&1 \
   || die "SDK configure failed (see $LOG)"
@@ -216,8 +261,10 @@ fi
 
 # --- Stage 4: game build ------------------------------------------------------
 log "=== Stage 4: game build (parallel $JOBS) ==="
+fix_stale_cpm_paths "$PROJ/out/build/mac-arm64-release/CMakeCache.txt"
 cmake -S "$PROJ" --preset mac-arm64-release \
   -DREXSDK_DIR="$SDK" \
+  -DCPM_SOURCE_CACHE="$CPM_CACHE_DIR" \
   -DREXGLUE_USE_VULKAN=ON -DREXGLUE_USE_D3D12=OFF \
   -DREXGLUE_OUTPUT_DIRECTORY="$PROJ/out/build/mac-arm64-release/runtime" \
   -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \

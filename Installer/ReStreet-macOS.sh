@@ -33,6 +33,7 @@ PROFILE="balanced"
 RES_W=""; RES_H=""
 FULLSCREEN=""; VSYNC=""
 READBACK=""
+KEYBOARD="true"
 DRY_RUN=0; SHOW_CONFIG=0; PLAY=0
 
 usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -52,6 +53,8 @@ while [ $# -gt 0 ]; do
     --windowed) FULLSCREEN=false; shift ;;
     --vsync) VSYNC="${2:?--vsync needs on|off}"; shift 2 ;;
     --readback) READBACK="${2:?--readback needs full|some|fast|none}"; shift 2 ;;
+    --keyboard) KEYBOARD=true; shift ;;
+    --no-keyboard) KEYBOARD=false; shift ;;
     --show-config) SHOW_CONFIG=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --save) SAVE_DEFAULTS=1; shift ;;
@@ -87,10 +90,10 @@ case "$PROFILE" in
     READBACK="${READBACK:-fast}"
     SCALE=1; MSAA=false; POST=none ;;
   quality)
-    RES_W="${RES_W:-2560}"; RES_H="${RES_H:-1440}"
+    RES_W="${RES_W:-1920}"; RES_H="${RES_H:-1080}"
     FULLSCREEN="${FULLSCREEN:-false}"; VSYNC="${VSYNC:-off}"
     READBACK="${READBACK:-some}"
-    SCALE=2; MSAA=false; POST=none ;;
+    SCALE=1; MSAA=false; POST=none ;;
   performance)
     RES_W="${RES_W:-1280}"; RES_H="${RES_H:-720}"
     FULLSCREEN="${FULLSCREEN:-false}"; VSYNC="${VSYNC:-off}"
@@ -116,6 +119,10 @@ ARGS=(
 if [ "$FULLSCREEN" = "true" ]; then ARGS+=("--fullscreen"); else ARGS+=("--no-fullscreen"); fi
 if [ "$VSYNC" = "on" ]; then ARGS+=("--vsync"); else ARGS+=("--no-vsync"); fi
 if [ "$MSAA" = "true" ]; then ARGS+=("--native_2x_msaa"); else ARGS+=("--no-native_2x_msaa"); fi
+# Keyboard/mouse -> controller emulation (MNK driver). ON by default on macOS:
+# most Macs have no Xbox pad plugged in, and the guest boots with no input
+# otherwise. Disable with --no-keyboard when a real pad is used.
+if [ "$KEYBOARD" = "true" ]; then ARGS+=("--mnk_mode"); else ARGS+=("--no-mnk_mode"); fi
 
 if [ "${SAVE_DEFAULTS:-0}" -eq 1 ]; then
   mkdir -p "$SUPPORT"
@@ -150,4 +157,15 @@ fi
 RUNDIR="$SUPPORT"
 mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR="$(mktemp -d -t restreet 2>/dev/null || echo "$EXE_DIR")"
 cd "$RUNDIR" || exit 1
+# Disable Retina 2x backing: without this, a 1280x720 window gets a
+# 2560x1440 swapchain (contents scale 2.0) and the GPU pays full 1440p.
+# With high-DPI off, 1280x720 = vraie 720p, 1920x1080 = vraie 1080p.
+export SDL_VIDEO_HIGHDPI_DISABLED=1
+export SDL_HINT_VIDEO_HIGHDPI_DISABLED=1
+# Redirect shader/pipeline caches into the support dir: under sandboxed or
+# restricted launches ~/.local/share may not be writable, and the run then
+# stalls ~20 s recompiling shaders every boot with
+# "persistent shader storage will be disabled".
+export XDG_CACHE_HOME="$RUNDIR/cache"
+mkdir -p "$XDG_CACHE_HOME" 2>/dev/null || true
 exec "$EXE" "${ARGS[@]}"

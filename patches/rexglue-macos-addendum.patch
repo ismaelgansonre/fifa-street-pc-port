@@ -21,6 +21,10 @@
 #    hard exit, resolved via dlsym (no-op in non-instrumented builds); the
 #    primary capture path is LLVM continuous mode (%c), which writes
 #    counters live and covers every instrumented module.
+# 8) window_sdl.cpp: on macOS do not set SDL_WINDOW_HIGH_PIXEL_DENSITY, so
+#    the swapchain stays 1x (1280x720 window -> 1280x720 present) instead of
+#    paying a Retina 2x present (2560x1440) on MoltenVK; SDL3 ignores the
+#    SDL2 SDL_VIDEO_HIGHDPI_DISABLED env var.
 #
 --- a/src/ui/game_ui_fonts.cpp
 +++ b/src/ui/game_ui_fonts.cpp
@@ -398,3 +402,22 @@ index b94fe9e..15871bc 100644
    std::_Exit(0);
  }
  
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -139,7 +139,14 @@ WindowSDL::~WindowSDL() {
+ bool WindowSDL::OpenImpl() {
+   // SDL window coordinates are physical pixels on Windows and X11. Cocoa
+   // uses logical points and applies the backing scale itself.
+-  SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN;
++  SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN;
++#if !REX_PLATFORM_MAC
++  // High-density swapchain is opt-in everywhere except macOS, where the
++  // Retina backing scale (2x) doubles the swapchain (1280x720 window ->
++  // 2560x1440 present) and the GPU pays full 1440p compositing on MoltenVK
++  // for no visual gain at this game's internal resolution.
++  flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
++#endif
+ #if REX_PLATFORM_MAC
+   int initial_width = int(GetDesiredLogicalWidth());
+   int initial_height = int(GetDesiredLogicalHeight());
