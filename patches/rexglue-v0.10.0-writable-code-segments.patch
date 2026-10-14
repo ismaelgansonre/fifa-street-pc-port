@@ -1,0 +1,86 @@
+diff --git a/include/rex/memory/utils.h b/include/rex/memory/utils.h
+index 8ccb52c..0b4708c 100644
+--- a/include/rex/memory/utils.h
++++ b/include/rex/memory/utils.h
+@@ -87,11 +87,6 @@ enum class DeallocationType {
+ // memory-mapped file must be used to write to executable pages.
+ bool IsWritableExecutableMemorySupported();
+ 
+-// Whether PageAccess::kExecuteReadWrite is a supported and preferred way of
+-// writing executable memory, useful for simulating how Xenia would work without
+-// writable executable memory on a system with it.
+-bool IsWritableExecutableMemoryPreferred();
+-
+ // Allocates a block of memory at the given page-aligned base address.
+ // Fails if the memory is not available.
+ // Specify nullptr for base_address to leave it up to the system.
+diff --git a/include/rex/system/flags.h b/include/rex/system/flags.h
+index 902bffd..8013f8c 100644
+--- a/include/rex/system/flags.h
++++ b/include/rex/system/flags.h
+@@ -24,7 +24,7 @@ REXCVAR_DECLARE(bool, kernel_debug_monitor);
+ REXCVAR_DECLARE(bool, kernel_cert_monitor);
+ REXCVAR_DECLARE(bool, ignore_thread_priorities);
+ REXCVAR_DECLARE(bool, ignore_thread_affinities);
+-REXCVAR_DECLARE(bool, writable_executable_memory);
++REXCVAR_DECLARE(bool, writable_code_segments);
+ REXCVAR_DECLARE(bool, protect_zero);
+ REXCVAR_DECLARE(bool, protect_on_release);
+ REXCVAR_DECLARE(bool, scribble_heap);
+diff --git a/src/core/memory.cpp b/src/core/memory.cpp
+index 316eb00..789f751 100644
+--- a/src/core/memory.cpp
++++ b/src/core/memory.cpp
+@@ -9,14 +9,9 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
+-#include <rex/cvar.h>
+ #include <rex/memory/utils.h>
+ #include <rex/platform.h>
+ 
+-REXCVAR_DEFINE_BOOL(writable_executable_memory, true, "Memory",
+-                    "Allow executable memory to be writable")
+-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+-
+ #if REX_ARCH_ARM64
+ #include <arm_neon.h>
+ #endif
+@@ -26,10 +21,6 @@ REXCVAR_DEFINE_BOOL(writable_executable_memory, true, "Memory",
+ namespace rex {
+ namespace memory {
+ 
+-bool IsWritableExecutableMemoryPreferred() {
+-  return REXCVAR_GET(writable_executable_memory);
+-}
+-
+ // TODO(benvanik): fancy AVX versions.
+ // https://github.com/gnuradio/volk/blob/master/kernels/volk/volk_16u_byteswap.h
+ // https://github.com/gnuradio/volk/blob/master/kernels/volk/volk_32u_byteswap.h
+diff --git a/src/system/xex_module.cpp b/src/system/xex_module.cpp
+index 0726516..46d1d71 100644
+--- a/src/system/xex_module.cpp
++++ b/src/system/xex_module.cpp
+@@ -32,6 +32,10 @@
+ #include <rex/system/xmodule.h>
+ #include <rex/types.h>
+ 
++REXCVAR_DEFINE_BOOL(writable_code_segments, false, "Memory",
++                    "Enables a program to write to its own code segments in memory")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ static const uint8_t xe_xex2_retail_key[16] = {0x20, 0xB1, 0x85, 0xA5, 0x9D, 0x28, 0xFD, 0xC3,
+                                                0x40, 0x58, 0x3F, 0xBB, 0x08, 0x96, 0xBF, 0x91};
+ static const uint8_t xe_xex2_devkit_key[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+@@ -1022,7 +1026,10 @@ bool XexModule::LoadContinue() {
+     switch (desc.info) {
+       case XEX_SECTION_CODE:
+       case XEX_SECTION_READONLY_DATA:
+-        heap->Protect(address, size, memory::kMemoryProtectRead);
++        heap->Protect(address, size,
++                      REXCVAR_GET(writable_code_segments)
++                          ? memory::kMemoryProtectRead | memory::kMemoryProtectWrite
++                          : memory::kMemoryProtectRead);
+         break;
+       case XEX_SECTION_DATA:
+         heap->Protect(address, size, memory::kMemoryProtectRead | memory::kMemoryProtectWrite);

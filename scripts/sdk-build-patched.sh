@@ -14,9 +14,15 @@ echo "=== [$(date +%H:%M:%S)] PHASE 1/4: sous-modules ==="
 git submodule update --init --recursive --depth 1 2>&1 | tail -5
 echo "submodules exit=$?"
 
-echo "=== [$(date +%H:%M:%S)] PHASE 2/4: patch overlap ==="
-git apply --check "$REPO/patches/rexglue-v0.10.0-image-overlap-fix.patch" 2>/dev/null && git apply "$REPO/patches/rexglue-v0.10.0-image-overlap-fix.patch" && echo "patch applique" || echo "patch deja applique ou invalide"
-git diff --stat | tail -2
+echo "=== [$(date +%H:%M:%S)] PHASE 2/4: patches ==="
+for patch in rexglue-v0.10.0-image-overlap-fix rexglue-v0.10.0-writable-code-segments; do
+    if git apply --check "$REPO/patches/$patch.patch" 2>/dev/null; then
+        git apply "$REPO/patches/$patch.patch" && echo "$patch applique"
+    else
+        echo "$patch deja applique ou invalide"
+    fi
+done
+git diff --stat | tail -3
 
 echo "=== [$(date +%H:%M:%S)] PHASE 3/4: build (preset mac-arm64, -j8) ==="
 cmake --preset mac-arm64 2>&1 | tail -6
