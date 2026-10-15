@@ -15,6 +15,7 @@ Le SDK téléchargé `ReXGlue/` reste immuable.
 | `rexglue-v0.10.0-vulkan-texture-pipeline-fixes.patch` | Vulkan : lire l'exponent bias des fetch constants au mot **3** au lieu du mot 4 (le DXBC fait déjà ça ; textures sombres/noires/vertes, issue #456), et compiler les pipelines sans pixel shader (ombre/profondeur) en asynchrone au lieu de bloquer le thread de rendu (PR #368). |
 | `rexglue-v0.10.0-waitmultiple-backoff.patch` | `WaitMultiple` POSIX : backoff exponentiel (1→16 ms) du polling, au lieu de re-verrouiller chaque mutex toutes les 1 ms ; réduit le CPU du thread audio (PR #368). |
 | `rexglue-v0.10.0-vmsum3fp128-mask.patch` | Codegen : masque `_mm_dp_ps` de `vmsum3fp128` corrigé de `0xEF` à `0x7F` (produit scalaire des éléments PPC 0,1,2 ; l'ancien masque prenait 3,2,1 et n'écrivait qu'une lane). **5211 occurrences** dans le code FIFA Street → nécessite une régénération codegen complète (issue/PR #426). |
+| `rexglue-v0.10.0-vulkan-presenter-pipeline-fix.patch` | Presenter Vulkan : stocker `swapchain_format` une fois le pipeline créé (sinon il est détruit/recréé **à chaque frame** avec une attente GPU complète → ~115 pipelines/s, des dizaines de milliers de warnings primitive restart et une sérialisation CPU/GPU par frame ; issue #507). Active aussi `primitiveRestartEnable` sur le triangle-strip final, requis par Metal (PR #487). |
 
 Le troisième patch est extrait de
 `windows-version/patches/rexglue-local-changes.patch`, également présent sur
