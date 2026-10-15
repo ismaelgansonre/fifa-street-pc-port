@@ -1,0 +1,88 @@
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -2057,11 +2057,23 @@
+           }
+         }
+ 
+-        // Apply the exponent bias from the bits 13:18 of the fetch constant
+-        // word 4.
++        // Apply the exponent bias from bits 13:18 of fetch constant word 3
++        // (the DXBC translator reads word 3; the Vulkan path used word 4).
++        id_vector_temp_.clear();
++        id_vector_temp_.push_back(const_int_0_);
++        id_vector_temp_.push_back(
++            builder_->makeIntConstant(int((fetch_constant_word_0_index + 3) >> 2)));
++        id_vector_temp_.push_back(
++            builder_->makeIntConstant(int((fetch_constant_word_0_index + 3) & 3)));
++        spv::Id fetch_constant_word_3 = builder_->createLoad(
++            builder_->createAccessChain(spv::StorageClassUniform, uniform_fetch_constants_,
++                                        id_vector_temp_),
++            spv::NoPrecision);
++        spv::Id fetch_constant_word_3_signed =
++            builder_->createUnaryOp(spv::OpBitcast, type_int_, fetch_constant_word_3);
+         spv::Id result_exponent_bias = builder_->createBinBuiltinCall(
+             type_float_, ext_inst_glsl_std_450_, GLSLstd450Ldexp, const_float_1_,
+-            builder_->createTriOp(spv::OpBitFieldSExtract, type_int_, fetch_constant_word_4_signed,
++            builder_->createTriOp(spv::OpBitFieldSExtract, type_int_, fetch_constant_word_3_signed,
+                                   builder_->makeUintConstant(13), builder_->makeUintConstant(6)));
+         {
+           uint32_t result_remaining_components = used_result_nonzero_components;
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -1111,8 +1111,8 @@
+     }
+   }
+ 
+-  bool use_async = REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
+-                   pixel_shader && placeholder_pixel_shader_ != VK_NULL_HANDLE;
++  bool use_async = REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty();
++  bool use_placeholder_swap = use_async && pixel_shader && placeholder_pixel_shader_ != VK_NULL_HANDLE;
+   uint8_t async_priority = pipeline_util::kPriorityLowest;
+   if (use_async) {
+     uint32_t bound_rts =
+@@ -1159,20 +1159,32 @@
+   bool queued_async_creation = false;
+   if (use_async) {
+     creation_arguments_real.priority = async_priority;
+-    PipelineCreationArguments creation_arguments_placeholder;
+-    if (TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
+-                                                      creation_arguments_placeholder, true)) {
+-      pipeline.second.is_placeholder.store(true, std::memory_order_release);
+-      if (EnsurePipelineCreated(creation_arguments_placeholder, placeholder_pixel_shader_)) {
+-        {
+-          std::lock_guard<std::mutex> lock(creation_request_lock_);
+-          creation_queue_.push(creation_arguments_real);
+-        }
+-        creation_request_cond_.notify_one();
+-        queued_async_creation = true;
+-      } else {
+-        pipeline.second.is_placeholder.store(false, std::memory_order_release);
++    if (use_placeholder_swap) {
++      PipelineCreationArguments creation_arguments_placeholder;
++      if (TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
++                                                        creation_arguments_placeholder, true)) {
++        pipeline.second.is_placeholder.store(true, std::memory_order_release);
++        if (EnsurePipelineCreated(creation_arguments_placeholder, placeholder_pixel_shader_)) {
++          {
++            std::lock_guard<std::mutex> lock(creation_request_lock_);
++            creation_queue_.push(creation_arguments_real);
++          }
++          creation_request_cond_.notify_one();
++          queued_async_creation = true;
++        } else {
++          pipeline.second.is_placeholder.store(false, std::memory_order_release);
++        }
++      }
++    } else {
++      // Depth/shadow-only pipeline: nothing cheaper to substitute, queue the
++      // real one and skip the draw for a few frames instead of stalling.
++      pipeline.second.is_placeholder.store(true, std::memory_order_release);
++      {
++        std::lock_guard<std::mutex> lock(creation_request_lock_);
++        creation_queue_.push(creation_arguments_real);
+       }
++      creation_request_cond_.notify_one();
++      queued_async_creation = true;
+     }
+   }
+ 

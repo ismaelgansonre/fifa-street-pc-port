@@ -1,0 +1,20 @@
+--- a/src/codegen/builders/vector.cpp
++++ b/src/codegen/builders/vector.cpp
+@@ -184,12 +184,14 @@
+ //=============================================================================
+ 
+ bool build_vmsum3fp128(BuilderContext& ctx) {
+-  // 3-element dot product accounting for guest->host vector element reversal
+-  // 0xEF = dot(yzw) with result broadcast to all elements (see constants doc)
++  // 3-element dot product of PPC elements 0,1,2 = host elements 3,2,1.
++  // _mm_dp_ps selects host elements with bits 7..4, so 0x7 selects host
++  // 1,2,3 and 0xF broadcasts to all lanes. 0xEF selected host 0,1,2 (PPC
++  // 3,2,1) and only wrote host element 3, leaving the other lanes zero.
+   ctx.emit_set_flush_mode(true);
+   ctx.println(
+       "\tsimde_mm_store_ps({}.f32, simde_mm_dp_ps(simde_mm_load_ps({}.f32), "
+-      "simde_mm_load_ps({}.f32), 0xEF));",
++      "simde_mm_load_ps({}.f32), 0x7F));",
+       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]));
+   return true;
+ }

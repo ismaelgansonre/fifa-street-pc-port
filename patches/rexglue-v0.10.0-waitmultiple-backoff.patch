@@ -1,0 +1,30 @@
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -334,6 +334,11 @@
+     auto end_time = (timeout == std::chrono::milliseconds::max())
+                         ? std::chrono::steady_clock::time_point::max()
+                         : start_time + timeout;
++
++    // Back off the poll interval the longer nothing is signaled, so an idle
++    // wait across several handles does not re-lock every mutex ~1000 times/s.
++    auto poll_interval = std::chrono::milliseconds(1);
++    constexpr auto kMaxPollInterval = std::chrono::milliseconds(16);
+ 
+     while (true) {
+       size_t first_signaled = std::numeric_limits<size_t>::max();
+@@ -412,12 +417,13 @@
+       }
+ 
+       if (timeout == std::chrono::milliseconds::max()) {
+-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++        std::this_thread::sleep_for(poll_interval);
+       } else {
+         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
+-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
++        auto sleep_time = std::min(remaining, poll_interval);
+         std::this_thread::sleep_for(sleep_time);
+       }
++      poll_interval = std::min(poll_interval * 2, kMaxPollInterval);
+     }
+   }
+ 

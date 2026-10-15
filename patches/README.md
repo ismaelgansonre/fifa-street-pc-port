@@ -12,6 +12,9 @@ Le SDK téléchargé `ReXGlue/` reste immuable.
 | `rexglue-v0.10.0-vulkan-3d-textures.patch` | Corriger les dimensions des fetches 2D de textures 3D et rafraîchir leur copie 3D→2D lorsqu'une vue est réutilisée. |
 | `rexglue-v0.10.0-vector-pack-fix.patch` | Corriger les packs vectoriels quand destination et source s'aliassent : `vpkuhus`/`vpkuwus` (charger les deux sources avant écriture, saturation non signée) et `vpkd3d128`/`vupkd3d128` (copier la source avant écriture). |
 | `rexglue-v0.10.0-present-interval-cap.patch` | FIFA Street : plafonner à 1 le *present interval* demandé par le callback de swap (`fifadllz`, `sub_8270F040`). Le jeu demande 2 dans les menus/replays/cutscenes, ce qui divise le framerate par deux (A ratés). Cvar `guest_present_interval_cap` (défaut 1, 0 = laisser le jeu décider). |
+| `rexglue-v0.10.0-vulkan-texture-pipeline-fixes.patch` | Vulkan : lire l'exponent bias des fetch constants au mot **3** au lieu du mot 4 (le DXBC fait déjà ça ; textures sombres/noires/vertes, issue #456), et compiler les pipelines sans pixel shader (ombre/profondeur) en asynchrone au lieu de bloquer le thread de rendu (PR #368). |
+| `rexglue-v0.10.0-waitmultiple-backoff.patch` | `WaitMultiple` POSIX : backoff exponentiel (1→16 ms) du polling, au lieu de re-verrouiller chaque mutex toutes les 1 ms ; réduit le CPU du thread audio (PR #368). |
+| `rexglue-v0.10.0-vmsum3fp128-mask.patch` | Codegen : masque `_mm_dp_ps` de `vmsum3fp128` corrigé de `0xEF` à `0x7F` (produit scalaire des éléments PPC 0,1,2 ; l'ancien masque prenait 3,2,1 et n'écrivait qu'une lane). **5211 occurrences** dans le code FIFA Street → nécessite une régénération codegen complète (issue/PR #426). |
 
 Le troisième patch est extrait de
 `windows-version/patches/rexglue-local-changes.patch`, également présent sur
