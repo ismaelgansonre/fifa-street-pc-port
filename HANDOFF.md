@@ -3,6 +3,66 @@
 Reprise : lis ceci, puis `bd ready` (projet `fifa_street_pc_port`). Objectif : **booter
 `/Users/ismael/Downloads/FIFAStreetXbox.iso`** (déjà extrait) nativement sur M1 Pro.
 
+## Session nuit 2026-10-14 → 15 — résumé (à lire en premier)
+
+Acquis de la session, dans l'ordre :
+
+1. **Menu Match Setup qui apparaissait puis disparaissait : RÉSOLU.**
+   Cause : transferts de propriété EDRAM des draws sans clipping.
+   Solution : `--execute_unclipped_draw_vs_on_cpu` (défaut `false` dans notre SDK,
+   `true` dans la config ReStreet). Reste à figer le défaut dans un patch.
+
+2. **Vidéo verte de l'intro : RÉSOLUE.** Patch
+   `patches/rexglue-v0.10.0-vector-pack-fix.patch` (alias `destination==source`
+   des `vpkuwus`/`vpkuhus`, 20 hunks, commit `884edd1`). Correspond à l'upstream
+   `rexglue-sdk#449` (issue #364, vidéo verte VP6, fermée).
+
+3. Autres patchs ajoutés (commits `e1711ba`, `c51c8e0`, `2928608`) :
+   - `present-interval-cap` : `guest_present_interval_cap=1`, le jeu demandait un
+     interval 2 dans menus/replays/cutscenes (moitié du framerate). Gain modéré seul.
+   - `vulkan-texture-pipeline-fixes` : exponent bias lu au **mot 3** au lieu du mot 4
+     (upstream `#456`, textures sombres/noires/vertes) ; pipelines ombre/profondeur
+     en asynchrone (`#368`).
+   - `waitmultiple-backoff` : polling `WaitMultiple` 1→16 ms (`#368`).
+   - `vmsum3fp128-mask` : masque `_mm_dp_ps` `0xEF`→`0x7F` (**5211 occurrences** dans
+     FIFA Street) — **pas encore compilé**, nécessite une régénération codegen.
+   - `vulkan-presenter-pipeline-fix` : le presenter recréait son pipeline à chaque
+     frame (upstream `#507`) → warnings primitive restart effondrés, un peu plus
+     fluide ; + `primitiveRestartEnable` pour Metal (`#487`).
+
+4. **Variante `dist/render-tests/vulkan-fixes-v1/`** (aucun codegen, GPU plugin +
+   runtime seulement) : present cap, exponent bias mot 3, depth-only async,
+   waitmultiple backoff, presenter #507/#487.
+
+Résultats utilisateur sur cette variante :
+- `--no-vsync` : menu avant-match rapide, joueurs apparaissent vite, utilisable,
+  un peu de latence, **foule noire**.
+- `--no-async_shader_compilation` : plus fluide que `--no-vsync`, menu sans lag,
+  **textures joueurs toujours incomplètes** (même dans le menu), touches un peu
+  lentes.
+- `--readback_resolve=full` : très lent du chargement au match, **foule rose**,
+  textures joueurs inchangées. `--readback_resolve=some` **pas encore testé**.
+- Warnings `Metal does not support disabling primitive restart` : fortement réduits.
+
+Reste ouvert : textures joueurs partielles, foule (noir/bleu/rose selon le mode),
+latence des touches, terrain/sol.
+
+Prochaines actions, dans l'ordre :
+1. **Rebuild codegen complet** (une fois) pour `vmsum3fp128` : patch déjà appliqué
+   et enregistré dans `sdk-build-patched.sh` ; puis
+   `zsh scripts/build-macos.sh`, `python3 scripts/freeze-build.py vmsum-v1`.
+2. **Porter le readback adaptatif `readback_some_*`** de ReStreet
+   (`readback_some_sync_addrs=1282B000`, `readback_some_sync_below=0`) : solution
+   validée pour le sol correct sans le stall du full. Absent de notre SDK.
+3. Tester `--readback_resolve=some` sur `vulkan-fixes-v1` (jamais fait).
+4. Si le terrain reste noir : piste `#508` (`--render_target_path_vulkan=fsi` en
+   essai isolé) ou format/tiling des textures.
+
+Outils : Xenia-edge (`/Applications/Xenia-edge.app`) est un oracle fonctionnel sur
+le même ISO ; l'API GitHub via `curl` et `web_search` fonctionnent ; les CLI
+`codex`/`zcode`/`muse`/`agy` sont bloqués par le sandbox (EPERM sur leurs dossiers
+d'état) → les lancer depuis le terminal utilisateur.
+
 ## État courant — boot et match confirmés par l'utilisateur
 
 ### Arrêt demandé par l'utilisateur — dernier résultat
