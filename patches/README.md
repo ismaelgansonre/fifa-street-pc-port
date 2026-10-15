@@ -14,8 +14,18 @@ Le SDK téléchargé `ReXGlue/` reste immuable.
 | `rexglue-v0.10.0-present-interval-cap.patch` | FIFA Street : plafonner à 1 le *present interval* demandé par le callback de swap (`fifadllz`, `sub_8270F040`). Le jeu demande 2 dans les menus/replays/cutscenes, ce qui divise le framerate par deux (A ratés). Cvar `guest_present_interval_cap` (défaut 1, 0 = laisser le jeu décider). |
 | `rexglue-v0.10.0-vulkan-texture-pipeline-fixes.patch` | Vulkan : lire l'exponent bias des fetch constants au mot **3** au lieu du mot 4 (le DXBC fait déjà ça ; textures sombres/noires/vertes, issue #456), et compiler les pipelines sans pixel shader (ombre/profondeur) en asynchrone au lieu de bloquer le thread de rendu (PR #368). |
 | `rexglue-v0.10.0-waitmultiple-backoff.patch` | `WaitMultiple` POSIX : backoff exponentiel (1→16 ms) du polling, au lieu de re-verrouiller chaque mutex toutes les 1 ms ; réduit le CPU du thread audio (PR #368). |
-| `rexglue-v0.10.0-vmsum3fp128-mask.patch` | Codegen : masque `_mm_dp_ps` de `vmsum3fp128` corrigé de `0xEF` à `0x7F` (produit scalaire des éléments PPC 0,1,2 ; l'ancien masque prenait 3,2,1 et n'écrivait qu'une lane). **5211 occurrences** dans le code FIFA Street → nécessite une régénération codegen complète (issue/PR #426). |
 | `rexglue-v0.10.0-vulkan-presenter-pipeline-fix.patch` | Presenter Vulkan : stocker `swapchain_format` une fois le pipeline créé (sinon il est détruit/recréé **à chaque frame** avec une attente GPU complète → ~115 pipelines/s, des dizaines de milliers de warnings primitive restart et une sérialisation CPU/GPU par frame ; issue #507). Active aussi `primitiveRestartEnable` sur le triangle-strip final, requis par Metal (PR #487). |
+
+> **Retiré le 15/10/2026 : `rexglue-v0.10.0-vmsum3fp128-mask.patch`.**
+> Le patch changeait le masque `_mm_dp_ps` de `vmsum3fp128` de `0xEF` à `0x7F` :
+> c'était une erreur. Pour `simde_mm_dp_ps`, le nibble **haut** sélectionne les
+> sources et le nibble **bas** les destinations ; `0xEF` = dot3 des lanes 1,2,3
+> (= guest x,y,z, stockage inversé) diffusé sur les 4 lanes, ce qui est exactement
+> la sémantique matérielle (Xenia `InstrEmit_vmsum3fp128` = `DotProduct3` + `Splat`).
+> Le `0x7F` sommait les lanes 0..2 (= guest w,z,y) et mettait host lane 3 à 0, or
+> host lane 3 = guest element 0, celui que le jeu relit (`stvx128` + `lfs`) :
+> **joueurs aplatis / invisibles** dans le checkpoint `vmsum-v1-BROKEN`. Vérifié
+> empiriquement en compilant `simde_mm_dp_ps` sur arm64.
 
 Le troisième patch est extrait de
 `windows-version/patches/rexglue-local-changes.patch`, également présent sur

@@ -17,7 +17,15 @@ git submodule update --init --recursive --depth 1 2>&1 | tail -5
 echo "submodules exit=$?"
 
 echo "=== [$(date +%H:%M:%S)] PHASE 2/4: patches ==="
-for patch in rexglue-v0.10.0-image-overlap-fix rexglue-v0.10.0-writable-code-segments rexglue-v0.10.0-shared-control-flow rexglue-v0.10.0-vulkan-3d-textures rexglue-v0.10.0-vector-pack-fix rexglue-v0.10.0-present-interval-cap rexglue-v0.10.0-vulkan-texture-pipeline-fixes rexglue-v0.10.0-waitmultiple-backoff rexglue-v0.10.0-vmsum3fp128-mask rexglue-v0.10.0-vulkan-presenter-pipeline-fix; do
+# NOTE (2026-10-15) : rexglue-v0.10.0-vmsum3fp128-mask a ete RETIRE.
+# Le masque d'origine 0xEF est deja correct : pour simde_mm_dp_ps le nibble haut
+# selectionne les sources et le nibble bas les destinations, donc 0xEF = dot3 des
+# lanes 1,2,3 (= guest x,y,z, stockage inversé) diffuse sur les 4 lanes.
+# Le "fix" 0x7F sommait les lanes 0..2 (= guest w,z,y) et ecrasait host lane 3
+# (= guest element 0) -> geometrie aplatie / joueurs invisibles.
+# Verifie empiriquement (simde sur arm64) et contre la reference Xenia
+# (InstrEmit_vmsum3fp128 = DotProduct3 + Splat).
+for patch in rexglue-v0.10.0-image-overlap-fix rexglue-v0.10.0-writable-code-segments rexglue-v0.10.0-shared-control-flow rexglue-v0.10.0-vulkan-3d-textures rexglue-v0.10.0-vector-pack-fix rexglue-v0.10.0-present-interval-cap rexglue-v0.10.0-vulkan-texture-pipeline-fixes rexglue-v0.10.0-waitmultiple-backoff rexglue-v0.10.0-vulkan-presenter-pipeline-fix; do
     if git apply --check "$REPO/patches/$patch.patch" 2>/dev/null; then
         git apply "$REPO/patches/$patch.patch" && echo "$patch applique"
     elif git apply --reverse --check "$REPO/patches/$patch.patch" 2>/dev/null; then

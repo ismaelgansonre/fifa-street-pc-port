@@ -24,8 +24,18 @@ Acquis de la session, dans l'ordre :
      (upstream `#456`, textures sombres/noires/vertes) ; pipelines ombre/profondeur
      en asynchrone (`#368`).
    - `waitmultiple-backoff` : polling `WaitMultiple` 1→16 ms (`#368`).
-   - `vmsum3fp128-mask` : masque `_mm_dp_ps` `0xEF`→`0x7F` (**5211 occurrences** dans
-     FIFA Street) — **pas encore compilé**, nécessite une régénération codegen.
+   - `vmsum3fp128-mask` : **ANNULÉ le 15/10 — le patch `0xEF`→`0x7F` était FAUX.**
+     `0xEF` était déjà correct : pour `simde_mm_dp_ps`, le nibble **haut** sélectionne
+     les sources et le nibble **bas** les destinations, donc `0xEF` = dot3 des lanes
+     1,2,3 (= guest x,y,z, stockage inversé) diffusé sur les 4 lanes. Le `0x7F`
+     sommait les lanes 0..2 (= guest w,z,y) et mettait host lane 3 à 0 — or host
+     lane 3 = guest element 0, celui que le jeu relit (`stvx128` + `lfs`) → joueurs
+     **aplatis/invisibles**. Vérifié empiriquement (`simde_mm_dp_ps` compilé arm64 :
+     `0xEF` → 14 partout = dot3, `0x7F` → 113 = mauvaises lanes) et contre la
+     référence Xenia (`InstrEmit_vmsum3fp128` = `DotProduct3` + `Splat`).
+     Patch supprimé de `patches/` et de `sdk-build-patched.sh` ;
+     `sdk-src/src/codegen/builders/vector.cpp` est revenu à `0xEF`.
+     → checkpoint `dist/checkpoints/vmsum-v1-BROKEN/` : **ne pas utiliser**.
    - `vulkan-presenter-pipeline-fix` : le presenter recréait son pipeline à chaque
      frame (upstream `#507`) → warnings primitive restart effondrés, un peu plus
      fluide ; + `primitiveRestartEnable` pour Metal (`#487`).
@@ -48,15 +58,20 @@ Reste ouvert : textures joueurs partielles, foule (noir/bleu/rose selon le mode)
 latence des touches, terrain/sol.
 
 Prochaines actions, dans l'ordre :
-1. **Rebuild codegen complet** (une fois) pour `vmsum3fp128` : patch déjà appliqué
-   et enregistré dans `sdk-build-patched.sh` ; puis
-   `zsh scripts/build-macos.sh`, `python3 scripts/freeze-build.py vmsum-v1`.
-2. **Porter le readback adaptatif `readback_some_*`** de ReStreet
+1. **Revenir à un binaire sain sans rien recompiler** : lancer
+   `dist/render-tests/vulkan-fixes-v1/launch.sh --execute_unclipped_draw_vs_on_cpu`
+   (même contenu que `vmsum-v1` **sans** le masque cassé). Le prochain
+   `zsh scripts/sdk-build-patched.sh && zsh scripts/build-macos.sh` régénère le
+   codegen avec le `0xEF` d'origine (patch retiré) : c'est la base propre suivante.
+2. **Tester deux choses sans rebuild** sur `vulkan-fixes-v1` :
+   - `--readback_resolve=some` (jamais testé ; le mode existe mais sans les réglages
+     adaptatifs `sync_addrs`/`sync_below`) ;
+   - `--render_target_path_vulkan=fsi` (piste upstream `#508`, un seul paramètre).
+3. **Porter le readback adaptatif `readback_some_*`** de ReStreet
    (`readback_some_sync_addrs=1282B000`, `readback_some_sync_below=0`) : solution
-   validée pour le sol correct sans le stall du full. Absent de notre SDK.
-3. Tester `--readback_resolve=some` sur `vulkan-fixes-v1` (jamais fait).
-4. Si le terrain reste noir : piste `#508` (`--render_target_path_vulkan=fsi` en
-   essai isolé) ou format/tiling des textures.
+   validée pour le sol correct sans le stall du full. Absent de notre SDK
+   (aucune cvar `readback_some_*` dans `sdk-src`).
+4. Si le terrain reste noir après 2/3 : format/tiling des textures.
 
 Outils : Xenia-edge (`/Applications/Xenia-edge.app`) est un oracle fonctionnel sur
 le même ISO ; l'API GitHub via `curl` et `web_search` fonctionnent ; les CLI
