@@ -1,0 +1,87 @@
+--- a/src/system/function_dispatcher.cpp
++++ b/src/system/function_dispatcher.cpp
+@@ -14,6 +14,7 @@
+  */
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
+ #include <rex/perf/counter.h>
+@@ -23,6 +24,16 @@
+ #include <rex/system/function_dispatcher.h>
+ #include <rex/system/thread_state.h>
+ 
++// FIFA Street only: the game's D3D swap callback asks for a present interval of 2 in menus,
++// replays and cutscenes, which halves the frame rate on any refresh rate. Capping it to 1
++// shows every frame; 0 leaves the game's own interval unchanged.
++REXCVAR_DEFINE_INT32(guest_present_interval_cap, 1, "GPU",
++                     "FIFA Street only: highest present interval (vblanks per displayed frame) the "
++                     "game's D3D swap callback may use. The game asks for 2 in menus, replays and "
++                     "cutscenes, which halves the frame rate; 1 shows every frame. 0 leaves the "
++                     "game's own interval unchanged.")
++    .range(0, 15);
++
+ namespace rex::runtime {
+ 
+ namespace {
+@@ -32,6 +43,50 @@
+   return runtime ? runtime->function_dispatcher() : nullptr;
+ }
+ 
++// FIFA Street's D3D library (fifadllzf.xex.dll, sub_8270F040) schedules each swap for the
++// vblank "last swap + interval", with the interval taken from bits 8..11 of its argument.
++// Capping the interval only changes how often frames are displayed, not the game's pacing logic.
++constexpr uint32_t kFifaStreetSwapCallback = 0x8270F040;
++::PPCFunc* g_swap_callback_original = nullptr;
++uint32_t g_swap_interval_cap = 1;
++
++void CappedSwapCallback(PPCContext& ctx, uint8_t* base) {
++  const uint32_t interval = (ctx.r3.u32 >> 8) & 0xF;
++  if (interval > g_swap_interval_cap) {
++    ctx.r3.u64 = (ctx.r3.u64 & ~uint64_t(0xF00)) | (uint64_t(g_swap_interval_cap) << 8);
++  }
++  g_swap_callback_original(ctx, base);
++}
++
++void ApplyFifaStreetPresentIntervalCap(FunctionDispatcher& dispatcher,
++                                       const std::string& module_id) {
++  if (module_id != "fifadllzf.xex.dll") {
++    return;
++  }
++  const int32_t cap = REXCVAR_GET(guest_present_interval_cap);
++  if (cap < 1) {
++    return;
++  }
++  const uint8_t* code = dispatcher.memory()->TranslateVirtual(kFifaStreetSwapCallback);
++  // Only the exact build this was found in: mflr r12 / stwu r1,-176(r1) / mr r30,r3.
++  if (!code || memory::load_and_swap<uint32_t>(code) != 0x7D8802A6 ||
++      memory::load_and_swap<uint32_t>(code + 8) != 0x9421FF50 ||
++      memory::load_and_swap<uint32_t>(code + 12) != 0x7C7E1B78) {
++    REXLOG_WARN("Present interval cap: swap callback {:08X} does not match the known code, not applied",
++                kFifaStreetSwapCallback);
++    return;
++  }
++  ::PPCFunc* original = dispatcher.GetFunction(kFifaStreetSwapCallback);
++  if (!original || original == &CappedSwapCallback) {
++    return;
++  }
++  g_swap_callback_original = original;
++  g_swap_interval_cap = uint32_t(cap);
++  dispatcher.SetFunction(kFifaStreetSwapCallback, &CappedSwapCallback);
++  REXLOG_INFO("Present interval cap: swap callback {:08X} limited to {} vblank(s) per frame",
++              kFifaStreetSwapCallback, cap);
++}
++
+ }  // namespace
+ 
+ static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
+@@ -349,6 +404,8 @@
+   } guard{this};
+ 
+   register_func(this);
++
++  ApplyFifaStreetPresentIntervalCap(*this, module_id);
+ 
+   ModuleRegistration reg;
+   reg.code_base = code_base;

@@ -11,6 +11,7 @@ Le SDK téléchargé `ReXGlue/` reste immuable.
 | `rexglue-v0.10.0-shared-control-flow.patch` | Reprendre le contrôle de flux partagé du portage Windows : fonction propriétaire, labels locaux, queues partagées et branches CTR externes. |
 | `rexglue-v0.10.0-vulkan-3d-textures.patch` | Corriger les dimensions des fetches 2D de textures 3D et rafraîchir leur copie 3D→2D lorsqu'une vue est réutilisée. |
 | `rexglue-v0.10.0-vector-pack-fix.patch` | Corriger les packs vectoriels quand destination et source s'aliassent : `vpkuhus`/`vpkuwus` (charger les deux sources avant écriture, saturation non signée) et `vpkd3d128`/`vupkd3d128` (copier la source avant écriture). |
+| `rexglue-v0.10.0-present-interval-cap.patch` | FIFA Street : plafonner à 1 le *present interval* demandé par le callback de swap (`fifadllz`, `sub_8270F040`). Le jeu demande 2 dans les menus/replays/cutscenes, ce qui divise le framerate par deux (A ratés). Cvar `guest_present_interval_cap` (défaut 1, 0 = laisser le jeu décider). |
 
 Le troisième patch est extrait de
 `windows-version/patches/rexglue-local-changes.patch`, également présent sur
@@ -27,6 +28,15 @@ les données de packing/unpacking. Le patch applique la version de la référenc
 de l'intro (retour utilisateur). Les textures de joueurs, de terrain et de foule
 restent incomplètes, et la scène de match reste lente à charger/rendre ; le menu
 Match Setup et l'intro sont corrects.
+
+**Present interval cap (14 octobre 2026)** : appliqué et compilé en runtime seul
+(pas de codegen, cible `rexruntime`). Gain observé seul : menu et gameplay un peu
+plus rapides, sans plus — le lot timing complet de la référence (`guest_vblank_unlocked`,
+True VSync, timer précis, partage du vblank moniteur) n'est pas porté.
+`--readback_resolve=full` corrige la foule et la réactivité des entrées (plus de A
+à presser deux fois) mais stalle ; c'est le mode validé par la référence, optimisé
+là-bas par le lot adaptatif `readback_some_*` absent de notre SDK. Le terrain reste
+incorrect même en full.
 
 ## Générer et vérifier avant de compiler le jeu
 
