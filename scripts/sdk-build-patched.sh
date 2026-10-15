@@ -17,7 +17,7 @@ git submodule update --init --recursive --depth 1 2>&1 | tail -5
 echo "submodules exit=$?"
 
 echo "=== [$(date +%H:%M:%S)] PHASE 2/4: patches ==="
-for patch in rexglue-v0.10.0-image-overlap-fix rexglue-v0.10.0-writable-code-segments rexglue-v0.10.0-shared-control-flow rexglue-v0.10.0-vulkan-3d-textures; do
+for patch in rexglue-v0.10.0-image-overlap-fix rexglue-v0.10.0-writable-code-segments rexglue-v0.10.0-shared-control-flow rexglue-v0.10.0-vulkan-3d-textures rexglue-v0.10.0-vector-pack-fix; do
     if git apply --check "$REPO/patches/$patch.patch" 2>/dev/null; then
         git apply "$REPO/patches/$patch.patch" && echo "$patch applique"
     elif git apply --reverse --check "$REPO/patches/$patch.patch" 2>/dev/null; then

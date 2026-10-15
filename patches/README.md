@@ -10,11 +10,23 @@ Le SDK téléchargé `ReXGlue/` reste immuable.
 | `rexglue-v0.10.0-writable-code-segments.patch` | Fournir `--writable_code_segments`, nécessaire aux écritures du jeu dans ses images. |
 | `rexglue-v0.10.0-shared-control-flow.patch` | Reprendre le contrôle de flux partagé du portage Windows : fonction propriétaire, labels locaux, queues partagées et branches CTR externes. |
 | `rexglue-v0.10.0-vulkan-3d-textures.patch` | Corriger les dimensions des fetches 2D de textures 3D et rafraîchir leur copie 3D→2D lorsqu'une vue est réutilisée. |
+| `rexglue-v0.10.0-vector-pack-fix.patch` | Corriger les packs vectoriels quand destination et source s'aliassent : `vpkuhus`/`vpkuwus` (charger les deux sources avant écriture, saturation non signée) et `vpkd3d128`/`vupkd3d128` (copier la source avant écriture). |
 
 Le troisième patch est extrait de
 `windows-version/patches/rexglue-local-changes.patch`, également présent sur
 `main` (origine `4ee3aee`). Il modifie cinq fichiers de codegen, sans reprendre
 l'optimisation d'inlining GPR/LR ni les modifications du renderer.
+
+Le cinquième patch est extrait du même `rexglue-local-changes.patch`
+(`src/codegen/builders/vector.cpp`, 20 hunks). Le code généré actuel contient des
+cas réels d'alias destination==source : 12 `vupkd3d128`, 4 `vpkuwus`,
+6 `vpkuwum` et 2 `vpkuhus` où la destination est aussi une source, ce qui corrompt
+les données de packing/unpacking. Le patch applique la version de la référence.
+
+**Validé le 14 octobre 2026** : le rebuild codegen + jeu corrige la **vidéo verte**
+de l'intro (retour utilisateur). Les textures de joueurs, de terrain et de foule
+restent incomplètes, et la scène de match reste lente à charger/rendre ; le menu
+Match Setup et l'intro sont corrects.
 
 ## Générer et vérifier avant de compiler le jeu
 
