@@ -91,6 +91,15 @@ Autres leviers de temps de cycle :
 - **Diagnostic** : `--log_file=<chemin> --log_level=warn` (les messages `REXGPU_WARN/ERROR`
   y sont) ; `--readback_some_log` (cvar) pour la table des plages ; `--vulkan_menu_trace=<csv>`
   (init-only) pour le détail par frame.
+- **Si *tout* est lent (menu compris) : ce n'est presque jamais le jeu.** Vérifier la charge
+  machine (`sysctl -n vm.loadavg`, viser < 2 ; `iostat -c 2 2` pour le % CPU/disque) et les
+  tâches de fond macOS — constaté le 15/10 : charge 15-23 sur 10 cœurs, `mdbulkimport` +
+  3× `mdworker_shared` (Spotlight réindexe les milliers de fichiers de `sdk-src/out`, `build/`,
+  `dist/` à chaque build), `backupd` (Time Machine) et `photoanalysisd` en parallèle, plus
+  7 Go/8 Go de RAM utilisés avec swap ⇒ tout le système rame, y compris un simple menu.
+  Parade : `.metadata_never_index` à la racine du repo (présent), sinon Confidentialité
+  Spotlight dans les Réglages, ou `sudo mdutil -i off /System/Volumes/Data` + `sudo killall
+  mdbulkimport mdworker_shared`. Bien fermer Obsidian/Chrome avant de jouer (8 Go de RAM).
 
 Prochaines actions, dans l'ordre :
 1. **Reconstruire le SDK et tester le readback adaptatif** (patience :
