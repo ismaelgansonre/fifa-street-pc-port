@@ -2,6 +2,13 @@
 # Internal blocks and shared epilogue belong to the allocation routine.
 0x8272ACE8 = { end = 0x8272B530 }
 
+# One switch/loop routine: case blocks share the store at 0x8264C4E4
+# and loop back to 0x8264C358. They are not standalone functions.
+0x8264C330 = { end = 0x8264C528 }
+
+# One predicate switch: cases branch back to the shared true/false returns.
+0x833B59B8 = { end = 0x833B5A44 }
+
 # BEGIN FIFA BULK FUNCTIONS
 0x83C53188 = { end = 0x83C5318C }
 # END FIFA BULK FUNCTIONS
@@ -855,23 +862,6 @@
 0x8264C094 = { end = 0x8264C098 }
 0x8264C1F4 = { end = 0x8264C1F8 }
 0x8264C294 = { end = 0x8264C298 }
-0x8264C424 = { end = 0x8264C430 }
-0x8264C430 = { end = 0x8264C43C }
-0x8264C43C = { end = 0x8264C448 }
-0x8264C448 = { end = 0x8264C454 }
-0x8264C454 = { end = 0x8264C460 }
-0x8264C460 = { end = 0x8264C46C }
-0x8264C46C = { end = 0x8264C478 }
-0x8264C478 = { end = 0x8264C484 }
-0x8264C484 = { end = 0x8264C48C }
-0x8264C48C = { end = 0x8264C494 }
-0x8264C494 = { end = 0x8264C4A0 }
-0x8264C4A0 = { end = 0x8264C4AC }
-0x8264C4AC = { end = 0x8264C4B8 }
-0x8264C4B8 = { end = 0x8264C4C4 }
-0x8264C4C4 = { end = 0x8264C4D0 }
-0x8264C4D0 = { end = 0x8264C4DC }
-0x8264C4DC = { end = 0x8264C528 }
 0x8264C62C = { end = 0x8264C630 }
 0x8264C7E4 = { end = 0x8264C7E8 }
 0x8264C984 = { end = 0x8264C988 }
@@ -34539,13 +34529,6 @@
 0x833B587C = { end = 0x833B5880 }
 0x833B589C = { end = 0x833B58A0 }
 0x833B5954 = { end = 0x833B5958 }
-0x833B59FC = { end = 0x833B5A08 }
-0x833B5A08 = { end = 0x833B5A10 }
-0x833B5A10 = { end = 0x833B5A18 }
-0x833B5A18 = { end = 0x833B5A20 }
-0x833B5A20 = { end = 0x833B5A28 }
-0x833B5A28 = { end = 0x833B5A30 }
-0x833B5A30 = { end = 0x833B5A44 }
 0x833B5A44 = { end = 0x833B5A48 }
 0x833B5B24 = { end = 0x833B5B28 }
 0x833B5B64 = { end = 0x833B5B68 }

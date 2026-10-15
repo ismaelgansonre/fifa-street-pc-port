@@ -1,0 +1,89 @@
+# SDK séparé pour FIFA Street macOS
+
+Base : ReXGlue `c94f5ebdcb3c9d1a460ca48e04f9758448f8d518` (v0.10.0).
+Appliquer les patches uniquement à `sdk-src/`, installer dans `dist/sdk/`.
+Le SDK téléchargé `ReXGlue/` reste immuable.
+
+| Patch, dans l'ordre d'application | Rôle |
+|---|---|
+| `rexglue-v0.10.0-image-overlap-fix.patch` | Charger les images DLL à leur base préférée sans faux chevauchement avec la réserve de thunks. |
+| `rexglue-v0.10.0-writable-code-segments.patch` | Fournir `--writable_code_segments`, nécessaire aux écritures du jeu dans ses images. |
+| `rexglue-v0.10.0-shared-control-flow.patch` | Reprendre le contrôle de flux partagé du portage Windows : fonction propriétaire, labels locaux, queues partagées et branches CTR externes. |
+| `rexglue-v0.10.0-vulkan-3d-textures.patch` | Corriger les dimensions des fetches 2D de textures 3D et rafraîchir leur copie 3D→2D lorsqu'une vue est réutilisée. |
+
+Le troisième patch est extrait de
+`windows-version/patches/rexglue-local-changes.patch`, également présent sur
+`main` (origine `4ee3aee`). Il modifie cinq fichiers de codegen, sans reprendre
+l'optimisation d'inlining GPR/LR ni les modifications du renderer.
+
+## Générer et vérifier avant de compiler le jeu
+
+```sh
+zsh scripts/sdk-build-patched.sh
+zsh scripts/build-macos.sh
+zsh scripts/boot-test.sh 45
+```
+
+Le script du jeu utilise le même SDK séparé pour le codegen et CMake. Il force
+une régénération si le hash du binaire `dist/sdk/bin/rexglue` change : le cache
+amont ne connaît que la version SDK et ne distingue pas nos patches locaux.
+Les exécutions suivantes conservent le cache par module.
+
+Avant la compilation du jeu, il lance les trois vérificateurs issus du portage
+Windows, restaurés sous `scripts/` : aucun saut direct irrésolu, aucun retour
+silencieux sur branche externe, et contrôle des régions CTR et allocation.
+Une erreur arrête le pipeline ; ne pas lancer de tests de boot en boucle avec
+une ancienne DLL.
+
+## Validation au 14 octobre 2026, 20:34
+
+- Les trois patches sont appliqués et vérifiables en sens inverse sur `sdk-src/`.
+- Le générateur corrigé compile en Release. Son UUID est
+  `30FA9E40-BA7A-3D92-88CD-44CF48432827`, identique dans la sortie source et
+  dans `dist/sdk/bin/rexglue` après staging.
+- L'installation a copié les fichiers dans `dist/sdk/`, puis échoué sur
+  l'enregistrement facultatif dans `~/.cmake/packages/rexglue` (sandbox).
+  Le projet utilise explicitement `CMAKE_PREFIX_PATH`, sans ce registre.
+- Les anciennes sorties échouent aux contrôles de branches directes et CTR ;
+  le contrôle de la région allocation passe.
+- La régénération avec le nouvel outil reste à valider : dans la session
+  restreinte, le runtime du codegen échoue à réserver la mémoire partagée
+  (`Unable to reserve the 4gb guest address space`).
+
+Logs : `dist/logs/sdk-control-flow-build.log`,
+`dist/logs/sdk-control-flow-install.log`, `dist/logs/control-flow-pipeline.log`,
+`dist/logs/verify-*-before-codegen.log`.
+
+## Lot graphique restant
+
+Le lot Vulkan 3D→2D est maintenant extrait de la référence, appliqué dans
+`sdk-src/` et compilé (deux fichiers GPU). Il est testé séparément dans
+`dist/render-tests/vulkan-3d-textures-v1/`, préparé par
+`python3 scripts/prepare-render-test.py <nom-unique>`. Cette variante remplace
+uniquement le plugin GPU du checkpoint ; tous les autres fichiers du runtime
+sont vérifiés par SHA-256. Son cache de shaders est isolé. Le résultat visuel
+reste à valider ; le renderer du checkpoint n'est pas remplacé.
+
+Le lanceur de variante utilise `run-logged.py --capture-runtime` : `runtime.log`
+est capturé dans le même dossier horodaté que la console et affiché en direct
+avec `[runtime]`. La rotation est suivie. Le compteur primitive restart compte
+les occurrences dans les deux flux, qui peuvent rapporter le même warning.
+
+L'audit de `main` relève d'autres correctifs à examiner séparément : opérations
+vectorielles, readback et resolve. Ils ne sont pas inclus dans ce lot. La référence macOS
+documente un rendu fenêtré avec `fsi`, alors que le payload générique utilise
+`fbo` et le plein écran ; vérifier la configuration effective lors des tests.
+
+## Conserver une version avant le lot suivant
+
+Après compilation, `python3 scripts/freeze-build.py <nom-unique>` préserve le
+runtime, le SDK, les sorties générées et les sources du projet sous
+`dist/checkpoints/<nom-unique>/`. Le script relance les trois vérificateurs,
+enregistre leurs résultats et les empreintes des binaires, puis fournit un
+`launch.sh` utilisant les bibliothèques sauvegardées. Le statut de boot reste
+`not_verified` : un contrôle statique ne prouve pas le démarrage.
+
+Le checkpoint `2026-10-14-codegen-validated` correspond au build terminé à 20:47,
+avec les trois vérifications réussies. Aucun nouveau build n'est nécessaire
+pour tester ce checkpoint. Il s'agit d'une sauvegarde locale ignorée par Git ;
+le script et les patches constituent les éléments versionnables du dépôt.

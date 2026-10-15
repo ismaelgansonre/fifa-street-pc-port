@@ -1,0 +1,183 @@
+# ReXGlue c94f5eb: opt-in per-frame menu diagnostics (project-local).
+# Records draw requests/submissions, shader hashes, texture descriptors and scissor.
+# Does not change rendering state or dump guest/host texture pixels.
+# Apply only to sdk-src/. Enable with --vulkan_menu_trace=<csv-path>.
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 001f36b..1a3d83f 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -14,6 +14,10 @@
+ #include <cstdint>
+ #include <cstring>
+ #include <iterator>
++#include <chrono>
++#include <filesystem>
++#include <fstream>
++#include <map>
+ #include <mutex>
+ #include <string>
+ #include <string_view>
+@@ -69,10 +73,121 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "device (falls back to render passes otherwise)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_STRING(vulkan_menu_trace, "", "GPU/Diagnostics",
++                      "CSV path for opt-in frame/draw/shader/texture-descriptor summaries; empty disables tracing")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
+ namespace rex::graphics::vulkan {
+ 
+ namespace {
+ 
++// Opt-in frame summaries. No pixel data or guest memory is read by this trace.
++class MenuFrameTrace {
++ public:
++  void Request(uint64_t frame) { Begin(frame); ++requested_; }
++  void Copy(uint64_t frame) { Begin(frame); ++copies_; }
++  void Fail(uint64_t frame) { Begin(frame); ++failed_; }
++
++  void Submit(uint64_t frame, const RegisterFile& regs, uint64_t vs, uint64_t ps,
++              uint32_t texture_mask, uint32_t vertices, uint32_t primitive,
++              const VkRect2D& scissor) {
++    Begin(frame);
++    ++submitted_;
++    uint64_t fetch_hash = 14695981039346656037ull;
++    std::string textures;
++    for (uint32_t slot = 0; slot < 32; ++slot) {
++      if (!(texture_mask & (uint32_t(1) << slot))) continue;
++      const auto fetch = regs.GetTextureFetch(slot);
++      const auto* bytes = reinterpret_cast<const uint8_t*>(&fetch);
++      for (size_t byte = 0; byte < sizeof(fetch); ++byte) {
++        fetch_hash = (fetch_hash ^ bytes[byte]) * 1099511628211ull;
++      }
++      if (!textures.empty()) textures += ';';
++      textures += fmt::format("{}:{:08X}/{}/{}", slot,
++          uint32_t(fetch.base_address) << 12, uint32_t(fetch.format),
++          uint32_t(fetch.dimension));
++    }
++    Key key = {vs, ps, fetch_hash, texture_mask,
++        regs.Get<reg::RB_COLORCONTROL>().value,
++        regs.Get<reg::RB_DEPTHCONTROL>().value,
++        regs.Get<reg::RB_SURFACE_INFO>().value,
++        uint64_t(scissor.offset.x), uint64_t(scissor.offset.y),
++        scissor.extent.width, scissor.extent.height, primitive};
++    auto& group = groups_[key];
++    ++group.draws;
++    group.vertices += vertices;
++    group.textures = std::move(textures);
++  }
++
++  void Present(uint64_t frame) { Begin(frame); Flush(); }
++
++ private:
++  using Key = std::array<uint64_t, 12>;
++  struct Group {
++    uint64_t draws = 0;
++    uint64_t vertices = 0;
++    std::string textures;
++  };
++  void Begin(uint64_t frame) {
++    if (!opened_) {
++      opened_ = true;
++      started_ = std::chrono::steady_clock::now();
++      const auto file_path = std::filesystem::path(REXCVAR_GET(vulkan_menu_trace));
++      std::error_code error;
++      if (file_path.has_parent_path()) {
++        std::filesystem::create_directories(file_path.parent_path(), error);
++      }
++      file_.open(file_path, std::ios::out | std::ios::trunc);
++      if (!file_) {
++        REXGPU_ERROR("Could not open menu frame trace: {}", file_path.string());
++      } else {
++        file_ << "elapsed_ms,frame,event,requested,submitted,copies,failed,vs,ps,fetch_hash,texture_mask,color_control,depth_control,surface,scissor_x,scissor_y,scissor_w,scissor_h,primitive,draws,vertices,textures\n";
++      }
++    }
++    if (frame_ != frame) {
++      Flush();
++      frame_ = frame;
++    }
++  }
++  void Flush() {
++    if (!requested_ && !copies_ && !failed_) return;
++    if (file_ && recorded_frames_ < 12000) {
++      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++          std::chrono::steady_clock::now() - started_).count();
++      file_ << fmt::format("{},{},frame,{},{},{},{},0,0,0,0,0,0,0,0,0,0,0,0,0,0,\n",
++          ms, frame_, requested_, submitted_, copies_, failed_);
++      for (const auto& [key, group] : groups_) {
++        file_ << fmt::format("{},{},draw,0,0,0,0,{:016X},{:016X},{:016X},{:08X},{:08X},{:08X},{:08X},{},{},{},{},{},{},{},{}\n",
++            ms, frame_, key[0], key[1], key[2], key[3], key[4], key[5], key[6],
++            int64_t(key[7]), int64_t(key[8]), key[9], key[10], key[11],
++            group.draws, group.vertices, group.textures);
++      }
++      // The title exits with _Exit, so don't rely on a destructor to flush.
++      file_.flush();
++      ++recorded_frames_;
++      if (recorded_frames_ == 12000) {
++        REXGPU_INFO("Menu trace reached its limit of 12000 frames; recording stopped");
++        file_.close();
++      }
++    }
++    groups_.clear();
++    requested_ = submitted_ = copies_ = failed_ = 0;
++  }
++  bool opened_ = false;
++  uint64_t frame_ = 0, recorded_frames_ = 0;
++  uint64_t requested_ = 0, submitted_ = 0, copies_ = 0, failed_ = 0;
++  std::chrono::steady_clock::time_point started_;
++  std::ofstream file_;
++  std::map<Key, Group> groups_;
++};
++
++MenuFrameTrace& GetMenuFrameTrace() {
++  // Guest draws, copies and swaps are serialized on the GPU command thread.
++  static thread_local MenuFrameTrace trace;
++  return trace;
++}
++
++
+ // glslang default built-in resource limits.
+ constexpr TBuiltInResource kGlslangDefaultTBuiltInResource = {
+     /* .maxLights = */ 32,
+@@ -2271,6 +2386,7 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+ 
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
++  if (!REXCVAR_GET(vulkan_menu_trace).empty()) GetMenuFrameTrace().Present(frame_current_);
+   SCOPE_profile_cpu_f("gpu");
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+@@ -3596,7 +3712,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+ 
+   const RegisterFile& regs = *register_file_;
+   (void)index_buffer_info;
++  const bool menu_trace_enabled = !REXCVAR_GET(vulkan_menu_trace).empty();
++  if (menu_trace_enabled) GetMenuFrameTrace().Request(frame_current_);
+   auto draw_fail = [&](const char* stage) {
++    if (menu_trace_enabled) GetMenuFrameTrace().Fail(frame_current_);
+     auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+     REXGPU_ERROR(
+         "Vulkan IssueDraw failed at {} "
+@@ -4154,6 +4273,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+                                               0, 0, 0);
+   }
+ 
++  if (menu_trace_enabled) {
++    GetMenuFrameTrace().Submit(frame_current_, regs, vertex_shader->ucode_data_hash(),
++        pixel_shader ? pixel_shader->ucode_data_hash() : 0, used_texture_mask,
++        primitive_processing_result.host_draw_vertex_count, uint32_t(prim_type),
++        dynamic_scissor_);
++  }
++
+   // Invalidate textures in memexported memory and watch for changes.
+   if (!memexport_ranges_.empty()) {
+     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+@@ -4382,6 +4508,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+ }
+ 
+ bool VulkanCommandProcessor::IssueCopy() {
++  if (!REXCVAR_GET(vulkan_menu_trace).empty()) GetMenuFrameTrace().Copy(frame_current_);
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES

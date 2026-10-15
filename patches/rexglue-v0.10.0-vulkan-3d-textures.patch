@@ -1,0 +1,110 @@
+# ReXGlue c94f5eb: Vulkan 2D fetches of 3D textures and cached-view refresh.
+# Extracted from windows-version/patches/rexglue-local-changes.patch.
+# Renderer only: no guest codegen changes or CPU recompilation required.
+# Apply only to sdk-src/, never to the downloaded ReXGlue/.
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 9ce3bb4..dbde6be 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -19,9 +19,14 @@
+ #include <fmt/format.h>
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DEFINE_BOOL(vulkan_fix_2d_fetch_of_3d_size, true, "GPU/Vulkan",
++                    "Read the 11/11/10 size packing when a 2D fetch samples a guest 3D texture (FIFA Street "
++                    "menu bars); disable to compare with the previous behaviour.");
++
+ namespace rex::graphics {
+ 
+ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+@@ -823,6 +828,12 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+       // whether the texture is 3D unconditionally.
+       data_is_3d_needed = true;
+     }
++    if (REXCVAR_GET(vulkan_fix_2d_fetch_of_3d_size) &&
++        instr.dimension == xenos::FetchOpDimension::k2D && (size_needed_components & 0b11)) {
++      // A 2D fetch of a guest 3D texture (FIFA Street k_8_8 UI textures) keeps the 11/11/10 size
++      // packing of the fetch constant; same fix as the DXBC translator.
++      data_is_3d_needed = true;
++    }
+     spv::Id data_is_3d = spv::NoResult;
+     if (data_is_3d_needed) {
+       // Get the data dimensionality from the bits 9:10 of the fetch constant
+@@ -868,10 +879,18 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+         } break;
+         case xenos::FetchOpDimension::k2D:
+         case xenos::FetchOpDimension::kCube: {
++          const bool is_2d = data_is_3d != spv::NoResult && instr.dimension == xenos::FetchOpDimension::k2D;
+           if (size_needed_components & 0b1) {
+             size[0] = builder_->createTriOp(
+                 spv::OpBitFieldUExtract, type_uint_, fetch_constant_word_2, const_uint_0_,
+                 builder_->makeUintConstant(xenos::kTexture2DCubeMaxWidthHeightLog2));
++            if (is_2d) {
++              spv::Id size_3d = builder_->createTriOp(
++                  spv::OpBitFieldUExtract, type_uint_, fetch_constant_word_2, const_uint_0_,
++                  builder_->makeUintConstant(xenos::kTexture3DMaxWidthHeightLog2));
++              size[0] = builder_->createTriOp(spv::OpSelect, type_uint_, data_is_3d, size_3d,
++                                              size[0]);
++            }
+           }
+           if (size_needed_components & 0b10) {
+             spv::Id width_height_bit_count =
+@@ -879,6 +898,15 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+             size[1] =
+                 builder_->createTriOp(spv::OpBitFieldUExtract, type_uint_, fetch_constant_word_2,
+                                       width_height_bit_count, width_height_bit_count);
++            if (is_2d) {
++              spv::Id bit_count_3d =
++                  builder_->makeUintConstant(xenos::kTexture3DMaxWidthHeightLog2);
++              spv::Id size_3d =
++                  builder_->createTriOp(spv::OpBitFieldUExtract, type_uint_, fetch_constant_word_2,
++                                        bit_count_3d, bit_count_3d);
++              size[1] = builder_->createTriOp(spv::OpSelect, type_uint_, data_is_3d, size_3d,
++                                              size[1]);
++            }
+           }
+           assert_zero(size_needed_components & 0b100);
+         } break;
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index ecbd940..11751c9 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -1952,12 +1952,31 @@ VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(bool i
+ 
+   VkImageView& cached_view =
+       is_signed ? image_view_3d_as_2d_signed_ : image_view_3d_as_2d_unsigned_;
++  VulkanTextureCache& vulkan_texture_cache = static_cast<VulkanTextureCache&>(texture_cache());
+   if (cached_view != VK_NULL_HANDLE) {
++    // This copy has its own memory watch. Reusing the view must not bypass
++    // invalidation of its contents after CPU or GPU writes to guest memory.
++    if (!texture_3d_as_2d_ || !vulkan_texture_cache.LoadTextureData(*texture_3d_as_2d_)) {
++      return VK_NULL_HANDLE;
++    }
++    texture_3d_as_2d_->MarkAsUsed();
++    const Usage old_usage = texture_3d_as_2d_->SetUsage(Usage::kGuestShaderSampled);
++    if (old_usage != Usage::kGuestShaderSampled) {
++      VkPipelineStageFlags src_stages;
++      VkAccessFlags src_access;
++      VkImageLayout old_layout;
++      vulkan_texture_cache.GetTextureUsageMasks(old_usage, src_stages, src_access, old_layout);
++      if (!vulkan_texture_cache.command_processor_.PushImageMemoryBarrier(
++              texture_3d_as_2d_->image(), ui::vulkan::util::InitializeSubresourceRange(),
++              src_stages, vulkan_texture_cache.guest_shader_pipeline_stages_,
++              src_access, VK_ACCESS_SHADER_READ_BIT, old_layout,
++              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) {
++        return VK_NULL_HANDLE;
++      }
++    }
+     return cached_view;
+   }
+ 
+-  VulkanTextureCache& vulkan_texture_cache = static_cast<VulkanTextureCache&>(texture_cache());
+-
+   if (!texture_3d_as_2d_) {
+     const HostFormatPair& host_format_pair = vulkan_texture_cache.GetHostFormatPair(key());
+     VkFormat wrapper_format = host_format_pair.format_unsigned.format;

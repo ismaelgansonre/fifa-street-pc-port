@@ -1,0 +1,133 @@
+# ReXGlue c94f5eb: shared-tail and branch ownership fixes.
+# Extracted from windows-version/patches/rexglue-local-changes.patch,
+# also present on main (original project commit 4ee3aee).
+# Only control-flow codegen; excludes GPR/LR inlining and all GPU changes.
+# Apply to sdk-src/, never to the downloaded ReXGlue/ SDK.
+
+diff --git a/src/codegen/builders/context.cpp b/src/codegen/builders/context.cpp
+--- a/src/codegen/builders/context.cpp
++++ b/src/codegen/builders/context.cpp
+@@ -281,7 +281,9 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
+ 
+   // Use classifyTarget for consistent branch classification
+   // false = branch instruction (not a call), so own-base means loop back
+-  auto kind = graph().classifyTarget(target, base, false);
++  // The current FunctionNode owns this emission. A shared-tail entry can
++  // overlap its blocks, so an instruction-address lookup may find another node.
++  auto kind = graph().classifyTarget(target, fn.base(), false);
+ 
+   switch (kind) {
+     case TargetKind::InternalLabel:
+diff --git a/src/codegen/builders/control_flow.cpp b/src/codegen/builders/control_flow.cpp
+index 26957fc..d80db2b 100644
+--- a/src/codegen/builders/control_flow.cpp
++++ b/src/codegen/builders/control_flow.cpp
+@@ -29,7 +29,7 @@ bool build_b(BuilderContext& ctx) {
+ 
+   // Use graph to classify the target - handles thunks that branch to nearby functions
+   // false = branch instruction (not a call), so own-base means loop back
+-  auto kind = ctx.graph().classifyTarget(target, ctx.base, false);
++  auto kind = ctx.graph().classifyTarget(target, ctx.fn.base(), false);
+ 
+   switch (kind) {
+     case TargetKind::InternalLabel:
+@@ -67,7 +67,7 @@ bool build_bl(BuilderContext& ctx) {
+ 
+   // Use graph to classify the target
+   // true = call instruction, so own-base means recursive call (not loop back)
+-  auto kind = ctx.graph().classifyTarget(target, ctx.base, true);
++  auto kind = ctx.graph().classifyTarget(target, ctx.fn.base(), true);
+ 
+   switch (kind) {
+     case TargetKind::InternalLabel:
+@@ -138,7 +138,13 @@ bool build_bctr(BuilderContext& ctx) {
+         continue;
+       }
+ 
+-      auto kind = ctx.graph().classifyTarget(label, ctx.base, false);
++      auto kind = ctx.graph().classifyTarget(label, ctx.fn.base(), false);
++      // A table can dispatch to separately registered case functions, even
++      // when speculative discovery also claimed their addresses as labels.
++      if (kind == TargetKind::InternalLabel && label != ctx.fn.base() &&
++          ctx.graph().isEntryPoint(label)) {
++        kind = TargetKind::Function;
++      }
+       switch (kind) {
+         case TargetKind::InternalLabel:
+           ctx.println("\t\tgoto loc_{:X};", label);
+diff --git a/src/codegen/builders/helpers.h b/src/codegen/builders/helpers.h
+index dbc8d51..d02ca29 100644
+--- a/src/codegen/builders/helpers.h
++++ b/src/codegen/builders/helpers.h
+@@ -387,12 +387,23 @@ inline bool isMMIOUpperBits(uint32_t imm) {
+  */
+ inline void emitBranchWithBoundsCheck(BuilderContext& ctx, uint32_t target,
+                                       std::string_view condition, std::string_view instr_name) {
+-  if (target < ctx.fn.base() || target >= ctx.fn.end()) {
+-    REXCODEGEN_WARN("{} at {:X} branches outside function to {:X}", instr_name, ctx.base, target);
+-    ctx.println("\tif ({}) {{ /* branch to 0x{:X} outside function */ return; }}", condition,
+-                target);
+-  } else {
+-    ctx.println("\tif ({}) goto loc_{:X};", condition, target);
++  switch (ctx.graph().classifyTarget(target, ctx.fn.base(), false)) {
++    case TargetKind::InternalLabel:
++      ctx.println("\tif ({}) goto loc_{:X};", condition, target);
++      break;
++    case TargetKind::Function:
++    case TargetKind::Import:
++      ctx.println("\tif ({}) {{", condition);
++      ctx.emit_function_call(target);
++      ctx.println("\t\treturn;");
++      ctx.println("\t}}");
++      break;
++    case TargetKind::Unknown:
++      REXCODEGEN_ERROR("Unresolved {} target 0x{:08X} from 0x{:08X}", instr_name, target,
++                       ctx.base);
++      ctx.println("\tif ({}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",
++                  condition, ctx.base, target);
++      break;
+   }
+ }
+ 
+diff --git a/src/codegen/function_graph.cpp b/src/codegen/function_graph.cpp
+index fc918bb..3df62bd 100644
+--- a/src/codegen/function_graph.cpp
++++ b/src/codegen/function_graph.cpp
+@@ -1266,6 +1266,12 @@ TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
+     return isCallInstruction ? TargetKind::Function : TargetKind::InternalLabel;
+   }
+ 
++  // A block discovered in this caller stays local even if a shared-tail entry
++  // is registered at the same address later during iterative discovery.
++  if (callerFn && callerFn->isLabel(target) && callerFn->containsAddress(target)) {
++    return TargetKind::InternalLabel;
++  }
++
+   // Case 3: Target is a DIFFERENT function's entry point - this is a call/tail-call
+   // This handles cases where a small thunk function branches to another function
+   // whose entry point happens to fall within the thunk's address range
+diff --git a/src/codegen/phase_discover.cpp b/src/codegen/phase_discover.cpp
+index 1c73548..2d7d406 100644
+--- a/src/codegen/phase_discover.cpp
++++ b/src/codegen/phase_discover.cpp
+@@ -124,6 +124,20 @@ void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
+ 
+   // Add unresolved branches for later resolution
+   for (const auto& branch : result.unresolvedBranches) {
++    // Shared tails may be reached at an interior address of another function.
++    // Give an external branch target its own entry instead of accepting an
++    // address that validation can locate but code generation cannot call.
++    if (!branch.isCall && !graph.isEntryPoint(branch.target) &&
++        !node->containsAddress(branch.target) && !binary.isInImportExportRange(branch.target)) {
++      const auto* targetInsn = decoded.get(branch.target);
++      // The lightweight decoder does not classify every arithmetic opcode
++      // supported by the emitter (for example subfc). Only reject padding.
++      if (targetInsn && static_cast<uint32_t>(targetInsn->code) != 0 &&
++          static_cast<uint32_t>(targetInsn->code) != 0xFFFFFFFF) {
++        auto* tail = graph.addFunction(branch.target, 4, FunctionAuthority::DISCOVERED, true);
++        tail->setSharesRegisters(true);
++      }
++    }
+     graph.addUnresolvedJumpToFunction(funcAddr, branch.site, branch.target, branch.isCall,
+                                       branch.isConditional);
+   }

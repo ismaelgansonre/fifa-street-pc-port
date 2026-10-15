@@ -3,7 +3,7 @@
 # Usage : zsh scripts/boot-test.sh [secondes]   (défaut 30)
 # Sorties : dist/logs/boot-console.log, dist/logs/boot-title.png, build/logs/*
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WAIT=${1:-30}
+WAIT=${1:-75}
 LOGDIR="$REPO/dist/logs"
 mkdir -p "$LOGDIR"
 cd "$REPO/build" || exit 1
