@@ -57,6 +57,60 @@ Résultats utilisateur sur cette variante :
 Reste ouvert : textures joueurs partielles, foule (noir/bleu/rose selon le mode),
 latence des touches, terrain/sol.
 
+## 🎯 Session 15/10 soir — état exact et pistes suivantes
+
+**Acquis (prouvés par captures) :**
+
+1. **Perte de perf = hors du jeu** : charge machine 9-23 sur 10 cœurs à cause de
+   Spotlight (`mdbulkimport`/`mdworker`), Time Machine, `photoanalysisd`, iCloud. Corrigé
+   (`sysctl -n vm.loadavg` < 2 requis **avant** tout jugement). Voir la section « tout est
+   lent » plus bas. Un reboot ne suffit pas : Spotlight reprend l'import en attente.
+2. **Textures des joueurs : cause trouvée** → `runtime/fifastreet.toml` (écrit par **F4 →
+   sauvegarde**) contenait `gpu_allow_invalid_fetch_constants = true`, `readback_resolve_half_pixel_offset = true`,
+   `vulkan_readback_resolve = true`. Ce fichier **surcharge la ligne de commande** et
+   `gpu_allow_invalid_fetch_constants=true` fait décoder des fetch constants invalides au lieu
+   d'utiliser la texture noire de repli → maillots gris/mouchetés, foule magenta.
+   **Règle : ne jamais sauvegarder depuis F4 dans une variante de test ; supprimer le `.toml`.**
+   Après suppression + `--readback_resolve=full` : modèles du Match Setup **et** gros plan de
+   replay correctement texturés (visage, motif du maillot, crampons) ✅.
+3. **Nouveau patch** `rexglue-v0.10.0-memexport-draw-fallback.patch` : sur Metal (pas de
+   geometry shader), les draws où la rastérisation est désactivée (memexport) étaient refusés
+   car l'expansion GS était choisie **avant** de tester `rasterization_enabled` → vertex shader
+   jamais exécuté → données memexport absentes (`Failed in backend prim_type=1/8 tess_mode=1`).
+   Fix : quand la rastérisation est abandonnée, `geometry_shader = kNone` +
+   `primitive_topology = kPointList`. **Pas encore testé en jeu.**
+
+**Reste ouvert :** foule toujours **magenta** (capture 15/10 18:4x) et, dans le Match Setup, le
+modèle de **droite** (maillot gris/blanc) mal chargé alors que celui de **gauche** (rouge) est
+correct.
+
+**🔑 Indice majeur :** les deux modèles sont dans **la même frame, mêmes shaders, même
+pipeline** → le problème est donc **la texture elle-même** (format, mips, packing), pas le rendu
+ni le pipeline. La foule magenta suit la même logique (atlas de foule produit par resolve).
+
+**Pistes proposées pour la prochaine session (par ordre de coût/rendement) :**
+
+1. **Comparer les deux textures des modèles du Match Setup** : ce sont les seules qui diffèrent
+   dans une même frame. `--vulkan_menu_trace=<csv>` (init-only, patch menu-frame-trace déjà
+   dans le build) journalise par draw les shaders **et les descripteurs de textures** → on
+   identifie les deux textures et on compare leur décodage (format, tiled, mips) dans le log
+   `trace` (`Loaded/Created … texture with N packed/unpacked mip levels, base at …`).
+2. **Textures « packed mips »** : le log montre ~25 000 textures avec `packed mip levels`
+   (8/9/10/11) contre 38 000 en `1 unpacked mip level`. Les kits lointains/foule échantillonnent
+   des mips > 0 : vérifier le calcul de disposition des mips *packed* (`GetGuestMipsSize`,
+   `packed_mips`) — symptôme typique : net de près, garbage de loin.
+3. **Porter le reste du readback de référence** (`vulkan_readback_sync_budget_us`, champ
+   `average` des constantes de resolve, liaison bornée du buffer de resolve scalé, ~229 lignes
+   non portées de `vulkan/command_processor.cpp`) : c'est là que la référence a corrigé FIFA
+   Street (adresses `0x12493000`, `0x12BC3000`, `0x1282B000`).
+4. **Xenia-edge comme oracle** (`/Applications/Xenia-edge.app`, même ISO) : capture de la même
+   scène pour dire ce qui doit être affiché, et si notre port dérive.
+5. **Voie « data-first »** : dumper les textures guest (les PR amont #333/#294 « Texture dumper
+   and replacer » ne sont pas mergées, mais Xenia a un dumper) pour comparer la texture voulue
+   par le jeu et celle qu'on décode.
+6. **FSI** : `--render_target_path_vulkan=fsi` donne des personnages corrects mais un écran
+   coupé en deux (mise en page des resolves FSI) — piste de repli si le FBO reste bloqué.
+
 ## 🧪 Tester sans relancer le jeu (à lire avant tout nouveau test)
 
 Le SDK embarque des outils **déjà présents dans nos binaires** — plus besoin de relancer
