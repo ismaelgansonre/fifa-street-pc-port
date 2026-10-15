@@ -80,3 +80,6 @@ windows-version/
 
 # Patched SDK source build tree (scripts/sdk-build-patched.sh)
 sdk-src/
+
+# Empeche Spotlight d indexer les 4 Go de build (mdbulkimport saturait le CPU)
+.metadata_never_index
