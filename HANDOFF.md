@@ -57,30 +57,62 @@ Résultats utilisateur sur cette variante :
 Reste ouvert : textures joueurs partielles, foule (noir/bleu/rose selon le mode),
 latence des touches, terrain/sol.
 
+## 🧪 Tester sans relancer le jeu (à lire avant tout nouveau test)
+
+Le SDK embarque des outils **déjà présents dans nos binaires** — plus besoin de relancer
+pour changer une option :
+
+| Touche | Outil | Usage |
+|---|---|---|
+| **F4** | overlay *Settings* | liste **toutes** les cvars, triées, avec badge `[live]` / `[restart]` / `[init-only]` ; éditer une cvar `[live]` s'applique **immédiatement** |
+| **`` ` ``** (backtick) | console | `<cvar>` = afficher, `<cvar> <valeur>` = régler (hot), `find <mot>` = chercher, tab = complétion |
+| **F3** | overlay debug | FPS / stats / perf |
+| **F7** | succès | — |
+
+La **lifecycle par défaut est `kHotReload`** (`include/rex/cvar.h`) : `readback_resolve`,
+`native_2x_msaa`, `depth_float24_convert_in_pixel_shader`, `clear_memory_page_state`,
+`gpu_allow_invalid_fetch_constants`, `direct_host_resolve`, `async_shader_compilation`,
+`vulkan_fix_2d_fetch_of_3d_size`, **toutes les `readback_some_*`**… sont modifiables en jeu.
+Seules exceptions : `swap_post_effect` et `render_target_path_vulkan`, `vulkan_menu_trace`
+(restart / init-only).
+
+Autres leviers de temps de cycle :
+- **Changer du code GPU/runtime : pas besoin de recompiler le jeu.** Tout le GPU vit dans
+  `librexgpu-xenos.dylib` (`sdk-src/src/graphics/**`, y compris `command_processor.cpp`,
+  `shared_memory.cpp`) : `zsh scripts/sdk-build-patched.sh` puis copier
+  `sdk-src/out/mac-arm64/Release/librexgpu-xenos.dylib` dans une copie de variante
+  (`cp -cRp dist/render-tests/vulkan-fixes-v1 dist/render-tests/<label>`). Le jeu ne
+  relink pas.
+- `scripts/prepare-render-test.py <label>` fait la même chose depuis le checkpoint
+  `2026-10-14-codegen-validated` (mais n'échange que le plugin GPU : le presenter #507
+  vit dans `librexruntime.dylib`).
+- **Pas de relance de match** : PRACTICE ARENA depuis le menu principal pour les gros plans
+  de personnages ; un **replay** rejoue la même action à volonté pour comparer.
+- **Diagnostic** : `--log_file=<chemin> --log_level=warn` (les messages `REXGPU_WARN/ERROR`
+  y sont) ; `--readback_some_log` (cvar) pour la table des plages ; `--vulkan_menu_trace=<csv>`
+  (init-only) pour le détail par frame.
+
 Prochaines actions, dans l'ordre :
-1. **Revenir à un binaire sain sans rien recompiler** : lancer
-   `dist/render-tests/vulkan-fixes-v1/launch.sh --execute_unclipped_draw_vs_on_cpu`
-   (même contenu que `vmsum-v1` **sans** le masque cassé).
-   Pour reconstruire `build/` (chemin rapide, ~5-10 min) : `zsh scripts/build-macos.sh`
-   **seul** suffit — `generated/` a été repassé à la main en `0xEF` (5211 lignes
-   `simde_mm_dp_ps`) et le stamp de module fait que rexglue saute la régénération
-   (empreinte des entrées inchangée + sorties présentes). Les 396 TU concernés
-   sont simplement recompilés.
-   Chemin propre (quand on veut retoucher le SDK) :
-   `zsh scripts/sdk-build-patched.sh && zsh scripts/build-macos.sh` → le binaire
-   `rexglue` change, donc régénération complète (~7 min) mais résultat identique.
-   ⚠️ Tant que `sdk-build-patched.sh` n'a pas été relancé, `dist/sdk/bin/rexglue`
-   est encore le binaire `0x7F` de `vmsum-v1` : toute régénération forcée avant ce
-   rebuild reproduirait le bug.
-2. **Tester deux choses sans rebuild** sur `vulkan-fixes-v1` :
-   - `--readback_resolve=some` (jamais testé ; le mode existe mais sans les réglages
-     adaptatifs `sync_addrs`/`sync_below`) ;
-   - `--render_target_path_vulkan=fsi` (piste upstream `#508`, un seul paramètre).
-3. **Porter le readback adaptatif `readback_some_*`** de ReStreet
-   (`readback_some_sync_addrs=1282B000`, `readback_some_sync_below=0`) : solution
-   validée pour le sol correct sans le stall du full. Absent de notre SDK
-   (aucune cvar `readback_some_*` dans `sdk-src`).
-4. Si le terrain reste noir après 2/3 : format/tiling des textures.
+1. **Reconstruire le SDK et tester le readback adaptatif** (patience :
+   `librexgpu-xenos.dylib` seulement, pas de codegen) :
+   ```sh
+   zsh scripts/sdk-build-patched.sh          # 11 patches, dont readback-some-adaptive
+   cp -cRp dist/render-tests/vulkan-fixes-v1 dist/render-tests/readback-v1
+   cp sdk-src/out/mac-arm64/Release/librexgpu-xenos.dylib dist/render-tests/readback-v1/runtime/
+   zsh dist/render-tests/readback-v1/launch.sh --execute_unclipped_draw_vs_on_cpu \
+       --depth_float24_convert_in_pixel_shader --readback_resolve=some
+   ```
+   Puis, **en jeu** (F4 ou console) : `readback_resolve some|full|none` à chaud, et
+   `readback_some_log true` pour voir la table des plages qui sont rafraîchies.
+   C'est le correctif validé par la référence pour le sol/terrain propre sans le stall du `full`.
+2. Si le sol reste noir : `--render_target_path_vulkan=fsi` (piste upstream `#508`, init-only)
+   et format/tiling des textures.
+3. **Foule/joueurs** : les captures officielles FIFA Street 2012
+   ([gematsu](https://www.gematsu.com/2011/10/fifa-street-screenshots)) montrent une foule
+   colorée et stylisée **dans le vrai jeu** — ne plus considérer la foule multicolore comme
+   un bug en soi. Les joueurs, eux, doivent avoir visage/sponsor/numéro (cf.
+   `windows-version/docs/images/gameplay.png`) : besoin d'un **gros plan** (PRACTICE ARENA ou
+   célébration) et d'une comparaison **Xenia-edge** pour trancher.
 
 Outils : Xenia-edge (`/Applications/Xenia-edge.app`) est un oracle fonctionnel sur
 le même ISO ; l'API GitHub via `curl` et `web_search` fonctionnent ; les CLI

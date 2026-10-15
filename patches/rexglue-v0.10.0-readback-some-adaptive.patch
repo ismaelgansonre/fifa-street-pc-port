@@ -1,0 +1,403 @@
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <functional>
+ #include <cstdint>
+ #include <mutex>
+ #include <utility>
+@@ -79,6 +80,11 @@
+   bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
+   bool RequestRange(uint32_t start, uint32_t length);
+ 
++  // Called (from guest threads) with the page range invalidated by a guest write.
++  void SetInvalidationObserver(std::function<void(uint32_t, uint32_t)> observer) {
++    invalidation_observer_ = std::move(observer);
++  }
++
+   // Marks the range and, if not exact_range, potentially its surroundings
+   // (to up to the first GPU-written page, as an access violation exception
+   // count optimization) as modified by the CPU, also invalidating GPU-written
+@@ -154,6 +160,7 @@
+   uint32_t host_gpu_memory_sparse_allocations_ = 0;
+   uint32_t host_gpu_memory_sparse_used_bytes_ = 0;
+ 
++  std::function<void(uint32_t, uint32_t)> invalidation_observer_;
+   void* memory_invalidation_callback_handle_ = nullptr;
+   void* memory_data_provider_handle_ = nullptr;
+ 
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -530,6 +530,11 @@
+ 
+   FireWatches(page_first, page_last, false);
+ 
++  if (invalidation_observer_) {
++    invalidation_observer_(page_first << page_size_log2_,
++                           (page_last - page_first + 1) << page_size_log2_);
++  }
++
+   return std::make_pair(page_first << page_size_log2_, (page_last - page_first + 1)
+                                                            << page_size_log2_);
+ }
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -230,6 +230,39 @@
+   // Shared memexport readback enable state with backend legacy-flag override support.
+   bool IsReadbackMemexportEnabled(bool legacy_backend_flag) const;
+ 
++  // Adaptive "some" readback ported from the reference Windows port (ReStreet).
++  // `some` copies a resolve into guest memory only once per range, so that copy goes stale.
++  // When the guest later writes to pages overlapping such a range, shared memory re-uploads
++  // those pages from the stale copy over the newer GPU data, which shows up as garbage.
++  // Ranges that see such invalidations are refreshed on every resolve (like `fast`) for a
++  // while; the rest stay cheap.
++  struct SomeDecision {
++    bool refresh = false;  // copy this resolve into guest memory
++    bool sync = false;     // the copy slots are older than one frame: read the just-written one
++  };
++  // Render thread: counts one resolve of the range and decides whether to copy it into guest memory.
++  SomeDecision DecideSomeRefresh(uint64_t key, uint32_t address, uint32_t length, uint64_t frame);
++  void NoteSomeRangeSkipped(uint64_t key);
++  void NoteSomeRangeRefreshed(uint64_t key);
++  // Guest thread (called from the shared memory invalidation callback).
++  void OnGuestInvalidatedRange(uint32_t start, uint32_t length);
++
++  struct SomeRangeInfo {
++    uint32_t address = 0, length = 0;
++    uint32_t calls = 0, skipped = 0, refreshed = 0, hits = 0;
++    uint64_t hot_until_frame = 0;
++    uint64_t last_frame = 0;
++    uint64_t first_frame = 0;
++    uint32_t streak = 0;  // consecutive resolves on successive frames
++    bool stale = false;
++  };
++  std::mutex some_mutex_;
++  std::unordered_map<uint64_t, SomeRangeInfo> some_ranges_;
++  std::atomic<uint64_t> some_frame_{0};
++  uint32_t some_hit_logs_ = 0;
++  uint64_t some_decisions_ = 0;
++  uint64_t some_last_table_frame_ = 0;
++
+   memory::Memory* memory_ = nullptr;
+   system::KernelState* kernel_state_ = nullptr;
+   GraphicsSystem* graphics_system_ = nullptr;
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <cinttypes>
+ #include <cmath>
++#include <cstdlib>
+ #include <cstring>
+ #include <string_view>
+ 
+@@ -54,6 +55,61 @@
+     .allowed({"none", "fast", "some", "full"})
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(readback_some_adaptive, true, "GPU",
++                    "In 'some' readback mode, refresh the guest-memory copy of a resolved range "
++                    "on every resolve once the guest has written to pages overlapping it "
++                    "(prevents stale data being re-uploaded over newer GPU data).")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_INT32(readback_some_hot_frames, 900, "GPU",
++                     "How many frames a range stays refreshed after the guest last invalidated it.")
++    .range(1, 100000)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(readback_some_refresh_sporadic, true, "GPU",
++                    "In 'some' readback mode, always refresh ranges that are not resolved on "
++                    "every frame (textures the game builds from GPU results, for example while "
++                    "loading). Only ranges resolved every frame are skipped.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_STRING(readback_some_skip_addrs, "", "GPU",
++                      "Comma separated hex start addresses of resolve ranges that 'some' readback "
++                      "never refreshes (diagnostics).")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_STRING(readback_some_sync_addrs, "1282B000", "GPU",
++                      "Comma separated hex start addresses of resolve ranges that 'some' readback "
++                      "always refreshes and reads synchronously (diagnostics).")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_INT32(readback_some_sync_below, 3145728, "GPU",
++                     "In 'some' readback mode, ranges smaller than this many bytes that are "
++                     "refreshed are read synchronously for the current frame (like 'full'), "
++                     "instead of one frame late. 0 = off.")
++    .range(0, 1 << 28)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(readback_some_sporadic_sync, true, "GPU",
++                    "Read sporadic ranges synchronously (current frame), like 'full'. They are "
++                    "rare, so this costs almost nothing, and the game may build textures from them.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_INT32(readback_some_refresh_interval, 0, "GPU",
++                     "In 'some' readback mode, also refresh every range once every N resolves "
++                     "(0 = never). Bounds how stale the guest copy can get.")
++    .range(0, 100000)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_INT32(readback_some_refresh_below, 3145728, "GPU",
++                     "In 'some' readback mode, always refresh ranges smaller than this many bytes "
++                     "(cheap to copy). 0 = off.")
++    .range(0, 1 << 28)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(readback_some_log, false, "GPU",
++                    "Log the adaptive 'some' readback decisions and guest invalidations.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
+                     "When draw resolution scaling is active, sample from the center of each "
+                     "scaled block during resolve readback downscale")
+@@ -181,6 +237,147 @@
+                                          : ReadbackResolveMode::kDisabled;
+ }
+ 
++namespace {
++// Parses a comma separated list of hex addresses; cached by string value.
++bool AddressInList(const std::string& list, uint32_t address) {
++  size_t pos = 0;
++  while (pos < list.size()) {
++    size_t end = list.find(',', pos);
++    if (end == std::string::npos) {
++      end = list.size();
++    }
++    if (end > pos) {
++      const uint32_t value =
++          uint32_t(std::strtoul(list.substr(pos, end - pos).c_str(), nullptr, 16));
++      if (value == address) {
++        return true;
++      }
++    }
++    pos = end + 1;
++  }
++  return false;
++}
++}  // namespace
++
++CommandProcessor::SomeDecision CommandProcessor::DecideSomeRefresh(uint64_t key, uint32_t address,
++                                                                   uint32_t length,
++                                                                   uint64_t frame) {
++  some_frame_.store(frame, std::memory_order_relaxed);
++  SomeDecision decision;
++  std::lock_guard<std::mutex> lock(some_mutex_);
++  SomeRangeInfo& info = some_ranges_[key];
++  info.address = address;
++  info.length = length;
++  ++info.calls;
++  // Frame cadence of this range. Several resolves in one frame say nothing, so they keep the streak.
++  if (info.last_frame != 0 && frame > info.last_frame) {
++    if (frame - info.last_frame <= 2) {
++      ++info.streak;
++    } else {
++      info.streak = 0;
++    }
++  }
++  info.last_frame = frame;
++  if (info.first_frame == 0) {
++    info.first_frame = frame;
++  }
++  // Only a range resolved on at least half of all frames since it was first seen counts as
++  // "every frame"; one that is merely resolved in bursts keeps being refreshed.
++  const uint64_t age = frame - info.first_frame;
++  const bool every_frame = info.streak >= 8 && age >= 1200 && uint64_t(info.calls) * 2 >= age;
++  const int32_t interval = REXCVAR_GET(readback_some_refresh_interval);
++  const int32_t below = REXCVAR_GET(readback_some_refresh_below);
++  if (REXCVAR_GET(readback_some_adaptive) && frame <= info.hot_until_frame) {
++    decision.refresh = true;
++  } else if (REXCVAR_GET(readback_some_refresh_sporadic) && !every_frame) {
++    decision.refresh = true;
++    decision.sync = REXCVAR_GET(readback_some_sporadic_sync);
++  } else if (interval > 0 && info.calls % uint32_t(interval) == 0) {
++    decision.refresh = true;
++  } else if (below > 0 && length < uint32_t(below)) {
++    decision.refresh = true;
++  }
++  ++some_decisions_;
++  if (REXCVAR_GET(readback_some_log) && frame >= some_last_table_frame_ + 600) {
++    some_last_table_frame_ = frame;
++    std::vector<std::pair<uint64_t, const SomeRangeInfo*>> rows;
++    for (const auto& [row_key, row] : some_ranges_) {
++      rows.emplace_back(row_key, &row);
++    }
++    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
++      return uint64_t(a.second->length) * a.second->calls >
++             uint64_t(b.second->length) * b.second->calls;
++    });
++    REXGPU_INFO("[SOMETABLE] frame={} ranges={} (sorted by bytes resolved)", frame, rows.size());
++    for (size_t i = 0; i < rows.size() && i < 40; ++i) {
++      const SomeRangeInfo& row = *rows[i].second;
++      REXGPU_INFO(
++          "[SOMETABLE] {:08X}+{:X} ({:.2f} MB) calls={} skipped={} refreshed={} streak={} hits={} "
++          "stale={}",
++          row.address, row.length, row.length / 1048576.0, row.calls, row.skipped, row.refreshed,
++          row.streak, row.hits, row.stale);
++    }
++  }
++  // After skipped resolves the double-buffer slots hold old data, so the first refresh must read
++  // the slot that was just written.
++  const int32_t sync_below = REXCVAR_GET(readback_some_sync_below);
++  if (decision.refresh && sync_below > 0 && length < uint32_t(sync_below)) {
++    decision.sync = true;
++  }
++  decision.sync = decision.sync || (decision.refresh && info.stale);
++  const std::string skip_addrs = REXCVAR_GET(readback_some_skip_addrs);
++  const std::string sync_addrs = REXCVAR_GET(readback_some_sync_addrs);
++  if (!skip_addrs.empty() && AddressInList(skip_addrs, address)) {
++    decision = SomeDecision{};
++  } else if (!sync_addrs.empty() && AddressInList(sync_addrs, address)) {
++    decision.refresh = true;
++    decision.sync = true;
++  }
++  return decision;
++}
++
++void CommandProcessor::NoteSomeRangeSkipped(uint64_t key) {
++  std::lock_guard<std::mutex> lock(some_mutex_);
++  SomeRangeInfo& info = some_ranges_[key];
++  ++info.skipped;
++  info.stale = true;
++}
++
++void CommandProcessor::NoteSomeRangeRefreshed(uint64_t key) {
++  std::lock_guard<std::mutex> lock(some_mutex_);
++  SomeRangeInfo& info = some_ranges_[key];
++  ++info.refreshed;
++  info.stale = false;
++}
++
++void CommandProcessor::OnGuestInvalidatedRange(uint32_t start, uint32_t length) {
++  if (!length) {
++    return;
++  }
++  const uint64_t end = uint64_t(start) + length;
++  const uint64_t frame = some_frame_.load(std::memory_order_relaxed);
++  const bool log = REXCVAR_GET(readback_some_log);
++  const uint64_t hot_frames = uint64_t(REXCVAR_GET(readback_some_hot_frames));
++  std::lock_guard<std::mutex> lock(some_mutex_);
++  for (auto& [key, info] : some_ranges_) {
++    if (uint64_t(info.address) >= end || uint64_t(info.address) + info.length <= start) {
++      continue;
++    }
++    ++info.hits;
++    if (info.stale) {
++      info.hot_until_frame = frame + hot_frames;
++    }
++    if (log && some_hit_logs_ < 200) {
++      ++some_hit_logs_;
++      REXGPU_INFO(
++          "[SOME] guest invalidated {:08X}+{:X} over range {:08X}+{:X} (key {:016X}, calls={} "
++          "skipped={} refreshed={} stale={} hits={})",
++          start, length, info.address, info.length, key, info.calls, info.skipped, info.refreshed,
++          info.stale, info.hits);
++    }
++  }
++}
++
+ bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) const {
+   if (legacy_readback_memexport_cvar_name_ &&
+       rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_)) {
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -149,6 +149,7 @@
+     assert_true(submission_open_);
+     return deferred_command_buffer_;
+   }
++  bool IsResolveReadbackEnabled() const;
+ 
+   bool submission_open() const { return submission_open_; }
+   uint64_t GetCurrentSubmission() const {
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -1011,6 +1011,8 @@
+     REXGPU_ERROR("Failed to initialize shared memory");
+     return false;
+   }
++  shared_memory_->SetInvalidationObserver(
++      [this](uint32_t start, uint32_t length) { OnGuestInvalidatedRange(start, length); });
+ 
+   primitive_processor_ =
+       std::make_unique<VulkanPrimitiveProcessor>(*register_file_, *memory_, *shared_memory_, *this);
+@@ -2141,6 +2143,9 @@
+ 
+   primitive_processor_.reset();
+ 
++  if (shared_memory_) {
++    shared_memory_->SetInvalidationObserver(nullptr);
++  }
+   shared_memory_.reset();
+ 
+   ClearTransientDescriptorPools();
+@@ -4507,6 +4512,11 @@
+   return true;
+ }
+ 
++bool VulkanCommandProcessor::IsResolveReadbackEnabled() const {
++  return GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve)) !=
++         ReadbackResolveMode::kDisabled;
++}
++
+ bool VulkanCommandProcessor::IssueCopy() {
+   if (!REXCVAR_GET(vulkan_menu_trace).empty()) GetMenuFrameTrace().Copy(frame_current_);
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -4603,6 +4613,10 @@
+   uint64_t resolve_key = MakeReadbackResolveKey(written_address, written_length);
+   ReadbackBuffer& readback = readback_buffers_[resolve_key];
+   readback.last_used_frame = frame_current_;
++  SomeDecision some_decision;
++  if (readback_mode == ReadbackResolveMode::kSome) {
++    some_decision = DecideSomeRefresh(resolve_key, written_address, written_length, frame_current_);
++  }
+   uint32_t write_index = readback.current_index;
+   uint32_t readback_size = AlignReadbackBufferSize(written_length);
+   if (!ensure_readback_slot(readback, write_index, readback_size)) {
+@@ -4786,7 +4800,10 @@
+   }
+ 
+   bool is_cache_miss = false;
+-  if (use_delayed_sync && (readback.buffers[read_index] == VK_NULL_HANDLE ||
++  // Ranges forced to be read for the current frame (small / sporadic / previously invalidated by
++  // the guest) must come from the slot just written - the other one still holds stale data that
++  // the guest would re-upload over newer GPU output.
++  if (use_delayed_sync && (some_decision.sync || readback.buffers[read_index] == VK_NULL_HANDLE ||
+                            written_length > readback.sizes[read_index] ||
+                            readback.mapped_data[read_index] == nullptr)) {
+     is_cache_miss = true;
+@@ -4796,7 +4813,16 @@
+     }
+   }
+ 
+-  bool should_copy = (readback_mode == ReadbackResolveMode::kSome) ? is_cache_miss : true;
++  bool should_copy = (readback_mode == ReadbackResolveMode::kSome)
++                         ? (is_cache_miss || some_decision.refresh)
++                         : true;
++  if (readback_mode == ReadbackResolveMode::kSome) {
++    if (should_copy) {
++      NoteSomeRangeRefreshed(resolve_key);
++    } else {
++      NoteSomeRangeSkipped(resolve_key);
++    }
++  }
+   if (should_copy && readback.buffers[read_index] != VK_NULL_HANDLE &&
+       written_length <= readback.sizes[read_index] && readback.mapped_data[read_index] != nullptr) {
+     VkMappedMemoryRange readback_memory_range = {};
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -1164,7 +1164,9 @@
+           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
+       bool direct_resolved = false;
+       if (GetPath() == Path::kHostRenderTargets) {
+-        if (REXCVAR_GET(direct_host_resolve)) {
++        // With readback enabled the resolve must go through the guest-memory copy, otherwise the
++        // readback never sees it (this is why --readback_resolve=full/some appeared to do nothing).
++        if (REXCVAR_GET(direct_host_resolve) && !command_processor_.IsResolveReadbackEnabled()) {
+           direct_resolved =
+               TryResolveCopyDirectly(resolve_info, copy_shader, draw_resolution_scaled);
+           if (direct_resolved) {
