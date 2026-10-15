@@ -60,9 +60,18 @@ latence des touches, terrain/sol.
 Prochaines actions, dans l'ordre :
 1. **Revenir à un binaire sain sans rien recompiler** : lancer
    `dist/render-tests/vulkan-fixes-v1/launch.sh --execute_unclipped_draw_vs_on_cpu`
-   (même contenu que `vmsum-v1` **sans** le masque cassé). Le prochain
-   `zsh scripts/sdk-build-patched.sh && zsh scripts/build-macos.sh` régénère le
-   codegen avec le `0xEF` d'origine (patch retiré) : c'est la base propre suivante.
+   (même contenu que `vmsum-v1` **sans** le masque cassé).
+   Pour reconstruire `build/` (chemin rapide, ~5-10 min) : `zsh scripts/build-macos.sh`
+   **seul** suffit — `generated/` a été repassé à la main en `0xEF` (5211 lignes
+   `simde_mm_dp_ps`) et le stamp de module fait que rexglue saute la régénération
+   (empreinte des entrées inchangée + sorties présentes). Les 396 TU concernés
+   sont simplement recompilés.
+   Chemin propre (quand on veut retoucher le SDK) :
+   `zsh scripts/sdk-build-patched.sh && zsh scripts/build-macos.sh` → le binaire
+   `rexglue` change, donc régénération complète (~7 min) mais résultat identique.
+   ⚠️ Tant que `sdk-build-patched.sh` n'a pas été relancé, `dist/sdk/bin/rexglue`
+   est encore le binaire `0x7F` de `vmsum-v1` : toute régénération forcée avant ce
+   rebuild reproduirait le bug.
 2. **Tester deux choses sans rebuild** sur `vulkan-fixes-v1` :
    - `--readback_resolve=some` (jamais testé ; le mode existe mais sans les réglages
      adaptatifs `sync_addrs`/`sync_below`) ;
