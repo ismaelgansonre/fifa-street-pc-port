@@ -1,0 +1,20 @@
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -1483,6 +1483,17 @@
+     // Keep parity with D3D12 by fully disabling rasterization for draws where
+     // only non-raster stages (for instance, vertex memexport) can have side
+     // effects.
++    // The primitive expansion geometry shaders (point / quad / rectangle lists)
++    // only exist to produce rasterized output, so with rasterization discarded
++    // they are not needed at all. Leaving them enabled made hosts without
++    // geometry shader support (Metal via MoltenVK) refuse the whole pipeline,
++    // dropping the draw and never running the vertex shader - and games use
++    // these draws to write data through vertex memexport (FIFA Street: the
++    // crowd / render-to-texture atlases, which then sampled as magenta).
++    // A point list keeps one vertex shader invocation per vertex, matching what
++    // the guest's vertex shader would do.
++    description_out.geometry_shader = PipelineGeometryShader::kNone;
++    description_out.primitive_topology = PipelinePrimitiveTopology::kPointList;
+     description_out.rasterizer_discard = 1;
+     return true;
+   }

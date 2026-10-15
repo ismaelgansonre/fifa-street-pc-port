@@ -25,7 +25,7 @@ echo "=== [$(date +%H:%M:%S)] PHASE 2/4: patches ==="
 # (= guest element 0) -> geometrie aplatie / joueurs invisibles.
 # Verifie empiriquement (simde sur arm64) et contre la reference Xenia
 # (InstrEmit_vmsum3fp128 = DotProduct3 + Splat).
-for patch in rexglue-v0.10.0-image-overlap-fix rexglue-v0.10.0-writable-code-segments rexglue-v0.10.0-shared-control-flow rexglue-v0.10.0-vulkan-3d-textures rexglue-v0.10.0-vector-pack-fix rexglue-v0.10.0-present-interval-cap rexglue-v0.10.0-vulkan-texture-pipeline-fixes rexglue-v0.10.0-waitmultiple-backoff rexglue-v0.10.0-vulkan-presenter-pipeline-fix rexglue-v0.10.0-menu-frame-trace rexglue-v0.10.0-readback-some-adaptive; do
+for patch in rexglue-v0.10.0-image-overlap-fix rexglue-v0.10.0-writable-code-segments rexglue-v0.10.0-shared-control-flow rexglue-v0.10.0-vulkan-3d-textures rexglue-v0.10.0-vector-pack-fix rexglue-v0.10.0-present-interval-cap rexglue-v0.10.0-vulkan-texture-pipeline-fixes rexglue-v0.10.0-waitmultiple-backoff rexglue-v0.10.0-vulkan-presenter-pipeline-fix rexglue-v0.10.0-menu-frame-trace rexglue-v0.10.0-readback-some-adaptive rexglue-v0.10.0-memexport-draw-fallback; do
     if git apply --check "$REPO/patches/$patch.patch" 2>/dev/null; then
         git apply "$REPO/patches/$patch.patch" && echo "$patch applique"
     elif git apply --reverse --check "$REPO/patches/$patch.patch" 2>/dev/null; then
