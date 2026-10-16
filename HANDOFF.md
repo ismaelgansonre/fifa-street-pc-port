@@ -78,7 +78,12 @@ latence des touches, terrain/sol.
    car l'expansion GS était choisie **avant** de tester `rasterization_enabled` → vertex shader
    jamais exécuté → données memexport absentes (`Failed in backend prim_type=1/8 tess_mode=1`).
    Fix : quand la rastérisation est abandonnée, `geometry_shader = kNone` +
-   `primitive_topology = kPointList`. **Pas encore testé en jeu.**
+   `primitive_topology = kPointList`. **Testé le 15/10 à 20:10** (plugin recopié à 20:08) : le
+   log ne contient **plus aucun échec `prim=1` ni `prim=8`** → les draws memexport s'exécutent
+   enfin ; il ne reste que 14 échecs **transitoires** `prim=4/6` (depth-only async : une
+   signature = une première utilisation de pipeline). **Mais aucun changement visuel** → ce
+   n'était donc PAS la cause des textures personnages/foule : hypothèse éliminée proprement
+   (le patch reste, il est correct et supprime un abandon permanent de draws).
 
 **Reste ouvert :** foule toujours **magenta** (capture 15/10 18:4x) et, dans le Match Setup, le
 modèle de **droite** (maillot gris/blanc) mal chargé alors que celui de **gauche** (rouge) est
