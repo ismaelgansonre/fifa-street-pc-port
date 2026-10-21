@@ -3,6 +3,84 @@
 Reprise : lis ceci, puis `bd ready` (projet `fifa_street_pc_port`). Objectif : **booter
 `/Users/ismael/Downloads/FIFAStreetXbox.iso`** (déjà extrait) nativement sur M1 Pro.
 
+## ⏸️ PAUSE 17/10 — reprise ici (lire en premier à la prochaine session)
+
+**État** : branche `j4-mnk-keyboard` (propre, commitée). J4 `ayu` clôturé
+(clavier validé). `8l9` en cours + sous-jalons `af6`/`844`/`ntn` créés.
+Build GPU courant `9f72589a` (patch average) dans `readback-avg-v1`, plus
+variante `texdump-v1` + outil hors-ligne `texview/`.
+Beads : mode embedded (`.beads/`, serveur Dolt partagé cassé → ne pas changer).
+
+**Acquis cette session** :
+- Menu Match Setup qui disparaissait : RÉSOLU par `--execute_unclipped_draw_vs_on_cpu`
+  (menu vient AVEC les joueurs). Ne plus tester sans ce flag.
+- MoltenVK déprécié par Khronos → KosmicKrisp installé (SDK LunarG 1.4.363.0,
+  `~/VulkanSDK`, conforme 1.4.3.2) mais rendu IDENTIQUE → MoltenVK éliminé.
+- Patch `readback-resolve-average` porté+buildé (portraits render-to-texture) :
+  foule noire→rose, textures inchangées. `full` = même rose → donnée source
+  mauvaise (memexport), pas l'heuristique `some`.
+- Échecs backend `configure_pipeline` (prim 1/8 indexés, `tess_mode=1`,
+  `source_select=2`) = création vkCreate refusée (description OK).
+  Suspect : topo/GS incompatible avec tessellation sur hôte sans GS.
+
+**À lancer (terminal utilisateur, pas le sandbox) — dans l'ordre** :
+```sh
+cd "/Users/ismael/Documents/GIT/fifa-street-pc-port"
+# 1) Run diagnostique : validation layers → le VUID exact du refus vkCreate
+V=$HOME/VulkanSDK/1.4.363.0
+VK_LAYER_PATH="$V/macOS/share/vulkan/explicit_layer.d" \
+VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation \
+zsh scripts/play-keyboard.sh readback-avg-v1 -- --execute_unclipped_draw_vs_on_cpu --readback_resolve=full --log_verbose
+# jouer ~1 min (sera lent : normal), quitter, puis :
+grep -i -E "VUID" dist/render-tests/readback-avg-v1/runtime/logs/fifastreet_*.log | head -n 20
+# 2) Renvoyer : lignes VUID + captures (Match Setup, match/foule) + dire si menu OK
+```
+**Ensuite** : selon le VUID, patcher `pipeline_cache.cpp` (cas tessellé sans GS)
+ou le fallback memexport ; sinon fallback `ntn` (revue packed-mips DXT).
+Skills dispo : `spec-miner` (chargé), `shader-programming` (ajouté par
+l'utilisateur dans `~/.agents/skills/`), REA si binaire inconnu.
+
+## Session 17/10 — J4 clavier (branche `j4-mnk-keyboard`)
+
+Le driver clavier/souris existe déjà dans le SDK (`sdk-src/src/input/mnk/`,
+cvar `mnk_mode`, défaut `false`, binds WASD/flèches) et est enregistré dans
+`input_system.cpp`. Rien à coder côté SDK (immuable de toute façon).
+Ajouté côté projet : `config/fifastreet-mnk.toml` (seed `mnk_mode=true`,
+`mnk_mouse=false`) + `scripts/play-keyboard.sh [variante]` qui seed/force
+`mnk_mode=true` dans `<variante>/runtime/fifastreet.toml` (le toml surcharge
+la CLI, le flag `--mnk_mode` seul ne suffit pas si un toml F4 traîne) puis
+lance avec `--mnk_mode`. Test à faire depuis le terminal utilisateur :
+`zsh scripts/play-keyboard.sh vulkan-fixes-v1` (ne pas sauvegarder via F4
+dans la variante). J4 `ayu` reste à valider en jeu.
+
+## Session 17/10 — KosmicKrisp prêt (MoltenVK déprécié)
+
+Khronos déprécie MoltenVK (maintenance communauté) et recommande KosmicKrisp
+sur Apple Silicon. Installé : LunarG SDK 1.4.363.0 dans `~/VulkanSDK`
+(ICD `macOS/share/vulkan/icd.d/libkosmickrisp_icd.json`). Vérifié :
+`vulkaninfo` → Apple M1 Pro, `DRIVER_ID_MESA_KOSMICKRISP`, conformance 1.4.3.2.
+Lancer le jeu dessus (depuis le terminal utilisateur) :
+```sh
+V=$HOME/VulkanSDK/1.4.363.0
+VK_ICD_FILENAMES="$V/macOS/share/vulkan/icd.d/libkosmickrisp_icd.json" \
+  zsh scripts/play-keyboard.sh vulkan-fixes-v1
+```
+Comparer Match Setup (textures maillots/visages), foule, terrain. Consigné en
+Beads `8l9`. J4 `ayu` clôturé (clavier validé en jeu).
+
+## Session 17/10 — analyse trace menu (8l9)
+
+Trace `dist/logs/menu-trace.csv` (49 760 lignes, 1 727 frames) : les draws des
+joueurs demandent bien des textures DXT1 (18), DXT2/3 (19), DXT4/5 (20) et
+8_8_8_8 (6) en fin de session — le pipeline les réclame, le décodage reste à
+vérifier. Les logs runtime (niveau warn) ne contiennent AUCUNE ligne texture :
+le décodage est en `REXGPU_TRACE` → refaire une passe avec `--log_verbose`
+(activable à chaud via la console backtick une fois dans le Match Setup).
+**Découverte : `execute_unclipped_draw_vs_on_cpu` n'a JAMAIS été actif dans les
+lancements** (défaut SDK `false`, absent du toml et des flags) → cause probable
+de la persistance du menu qui apparaît/disparaît. Prochain test : relancer avec
+le flag + trace ciblée, puis revue `GetGuestMipsSize`/packed-mips pour DXT.
+
 ## Session nuit 2026-10-14 → 15 — résumé (à lire en premier)
 
 Acquis de la session, dans l'ordre :
