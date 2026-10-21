@@ -1,0 +1,35 @@
+# Seed clavier/souris pour les tests rapides (J4) — SANS manette.
+# Copié vers <variante>/runtime/fifastreet.toml par scripts/play-keyboard.sh
+# (création seule si absent ; le toml surcharge la ligne de commande).
+# Référence rendu : windows-version/Installer/payload/Game/fifastreet.toml
+# (non repris ici : chaque variante garde ses propres réglages GPU).
+# Ne JAMAIS sauvegarder depuis F4 dans une variante de test (contamination).
+
+mnk_mode = true
+mnk_mouse = false
+mnk_sensitivity = 1.0
+
+# Binds par défaut du SDK (sdk-src/src/input/mnk/mnk_input_driver.cpp),
+# rappelés ici pour lisibilité — décommente pour surcharger :
+# keybind_lstick_up = "W"
+# keybind_lstick_down = "S"
+# keybind_lstick_left = "A"
+# keybind_lstick_right = "D"
+# keybind_a = "Semicolon,Space"
+# keybind_b = "Quote,Backspace"
+# keybind_x = "L"
+# keybind_y = "P"
+# keybind_rstick_up = "Up"
+# keybind_rstick_down = "Down"
+# keybind_rstick_left = "Left"
+# keybind_rstick_right = "Right"
+# keybind_dpad_up = "Shift+Up"
+# keybind_dpad_down = "Shift+Down"
+# keybind_dpad_left = "Shift+Left"
+# keybind_dpad_right = "Shift+Right"
+# keybind_left_trigger = "Q,I"
+# keybind_right_trigger = "E,O"
+# keybind_left_shoulder = "1"
+# keybind_right_shoulder = "3"
+# keybind_back = "Z,Tab"
+# keybind_start = "X,Return"
