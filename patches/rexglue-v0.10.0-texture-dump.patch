@@ -1,0 +1,234 @@
+# ReXGlue c94f5eb: opt-in raw guest texture dump (project-local).
+# Dumps raw guest bytes + descriptor (.retex) at upload time for the offline
+# texture viewer in texview/. Backend-independent, 2D only, first upload wins.
+# Does not change rendering. Apply only to sdk-src/.
+# Enable with --vulkan_dump_textures=<dir>.
+diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
+index d26cd4f..2a03d52 100644
+--- a/include/rex/graphics/pipeline/texture/cache.h
++++ b/include/rex/graphics/pipeline/texture/cache.h
+@@ -516,6 +516,10 @@ class TextureCache {
+   // should be made.
+   Texture* FindOrCreateTexture(TextureKey key);
+ 
++  // Opt-in dump of raw guest texture bytes for the offline viewer
++  // (--vulkan_dump_textures=<dir>). No-op when the cvar is empty.
++  void MaybeDumpGuestTexture(Texture& texture, bool load_base, bool load_mips);
++
+   static const LoadShaderInfo& GetLoadShaderInfo(LoadShaderIndex load_shader_index) {
+     assert_true(load_shader_index < kLoadShaderCount);
+     return load_shader_info_[load_shader_index];
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+index 4d85a2b..b3ea3e8 100644
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <functional>
+ #include <cstdint>
+ #include <mutex>
+ #include <utility>
+@@ -79,6 +80,11 @@ class SharedMemory {
+   bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
+   bool RequestRange(uint32_t start, uint32_t length);
+ 
++  // Called (from guest threads) with the page range invalidated by a guest write.
++  void SetInvalidationObserver(std::function<void(uint32_t, uint32_t)> observer) {
++    invalidation_observer_ = std::move(observer);
++  }
++
+   // Marks the range and, if not exact_range, potentially its surroundings
+   // (to up to the first GPU-written page, as an access violation exception
+   // count optimization) as modified by the CPU, also invalidating GPU-written
+@@ -95,6 +101,13 @@ class SharedMemory {
+   // regions in those pages.
+   void RangeWrittenByGpu(uint32_t start, uint32_t length);
+ 
++  // Translates a resident guest physical address to a readable host pointer
++  // (for opt-in diagnostics like the texture dumper; the range must have been
++  // made resident via RequestRange first).
++  uint8_t* TranslateResidentGuestPhysical(uint32_t guest_physical_address) const {
++    return memory().TranslatePhysical(guest_physical_address);
++  }
++
+  protected:
+   SharedMemory(memory::Memory& memory);
+   // Call in implementation-specific initialization.
+@@ -154,6 +167,7 @@ class SharedMemory {
+   uint32_t host_gpu_memory_sparse_allocations_ = 0;
+   uint32_t host_gpu_memory_sparse_used_bytes_ = 0;
+ 
++  std::function<void(uint32_t, uint32_t)> invalidation_observer_;
+   void* memory_invalidation_callback_handle_ = nullptr;
+   void* memory_data_provider_handle_ = nullptr;
+ 
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 76f5600..e2b4d3e 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -11,7 +11,15 @@
+ 
+ #include <algorithm>
+ #include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <mutex>
++#include <string>
++#include <unordered_set>
+ #include <utility>
++#include <vector>
+ 
+ #include <rex/assert.h>
+ #include <rex/chrono/clock.h>
+@@ -49,6 +57,42 @@ REXCVAR_DEFINE_BOOL(gpu_3d_to_2d_texture, true, "GPU",
+                     "Sample problematic 3D textures through 2D-compatible wrappers")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_STRING(vulkan_dump_textures, "", "GPU/Diagnostics",
++                      "Directory for opt-in raw guest texture dumps (.retex files) "
++                      "consumed by the offline texture viewer; empty disables dumping")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
++namespace {
++
++// Raw guest bytes + descriptor for one texture, consumed by texview/.
++// All integers are little-endian.
++struct RetexHeader {
++  char magic[8];  // "RETEX01\0"
++  uint32_t width, height, depth_or_array;
++  uint32_t dimension;  // xenos::DataDimension
++  uint32_t format;     // xenos::TextureFormat
++  uint32_t tiled, packed_mips;
++  uint32_t pitch;  // base_pitch_texels_div_32 from the fetch constant
++  uint32_t mip_max_level, has_base, endianness;
++  uint32_t base_size_bytes, mips_size_bytes;
++};
++
++struct TextureDumpState {
++  std::mutex mutex;
++  std::unordered_set<uint64_t> dumped_hashes;
++  uint32_t file_count = 0;
++  bool dir_ready = false;
++  static constexpr uint32_t kMaxFiles = 1024;
++  static constexpr uint32_t kMaxBytesPerTexture = 64u << 20;
++};
++
++TextureDumpState& GetTextureDumpState() {
++  static TextureDumpState state;
++  return state;
++}
++
++}  // namespace
++
+ REXCVAR_DEFINE_INT32(anisotropic_override, 3, "GPU",
+                      "Forces anisotropic filtering for eligible textures.\n"
+                      "Higher values keep textures sharper at oblique angles, but increase texture "
+@@ -413,6 +457,94 @@ bool TextureCache::PrepareTextureLoad(Texture& texture, PendingTextureLoad& pend
+   return true;
+ }
+ 
++void TextureCache::MaybeDumpGuestTexture(Texture& texture, bool load_base, bool load_mips) {
++  const std::string dump_dir(REXCVAR_GET(vulkan_dump_textures));
++  if (dump_dir.empty()) {
++    return;
++  }
++  const TextureKey key = texture.key();
++  // Render targets and non-2D textures are out of scope for the offline viewer.
++  if (key.scaled_resolve || key.dimension != xenos::DataDimension::k2DOrStacked) {
++    return;
++  }
++  const bool has_base = key.base_page != 0 && load_base;
++  const bool has_mips = key.mip_page != 0 && load_mips;
++  if (!has_base && !has_mips) {
++    return;
++  }
++  uint32_t base_size = has_base ? texture.GetGuestBaseSize() : 0;
++  uint32_t mips_size = has_mips ? texture.GetGuestMipsSize() : 0;
++  TextureDumpState& state = GetTextureDumpState();
++  if (base_size > TextureDumpState::kMaxBytesPerTexture ||
++      mips_size > TextureDumpState::kMaxBytesPerTexture) {
++    return;
++  }
++  // Identity of the guest allocation (first upload wins; menu textures are static).
++  uint64_t hash = 14695981039346656037ull;
++  const auto mix = [&hash](uint32_t v) {
++    for (int i = 0; i < 4; ++i) hash = (hash ^ uint8_t(v >> (8 * i))) * 1099511628211ull;
++  };
++  mix(key.base_page);
++  mix(key.mip_page);
++  mix(key.width_minus_1);
++  mix(key.height_minus_1);
++  mix(uint32_t(key.format));
++  mix(key.pitch);
++  mix((uint32_t(key.tiled) << 1) | uint32_t(key.packed_mips));
++  uint32_t file_index = 0;
++  {
++    std::lock_guard<std::mutex> lock(state.mutex);
++    if (!state.dir_ready) {
++      std::error_code error;
++      std::filesystem::create_directories(dump_dir, error);
++      state.dir_ready = true;
++    }
++    if (state.file_count >= TextureDumpState::kMaxFiles) {
++      return;
++    }
++    if (!state.dumped_hashes.insert(hash).second) {
++      return;
++    }
++    file_index = state.file_count++;
++  }
++  RetexHeader header = {};
++  std::memcpy(header.magic, "RETEX01", 8);
++  header.width = key.GetWidth();
++  header.height = key.GetHeight();
++  header.depth_or_array = key.GetDepthOrArraySize();
++  header.dimension = uint32_t(key.dimension);
++  header.format = uint32_t(key.format);
++  header.tiled = key.tiled ? 1 : 0;
++  header.packed_mips = key.packed_mips ? 1 : 0;
++  header.pitch = key.pitch;
++  header.mip_max_level = key.mip_max_level;
++  header.has_base = has_base ? 1 : 0;
++  header.endianness = uint32_t(key.endianness);
++  header.base_size_bytes = base_size;
++  header.mips_size_bytes = mips_size;
++  std::vector<uint8_t> base_bytes(base_size), mips_bytes(mips_size);
++  if (base_size) {
++    std::memcpy(base_bytes.data(),
++                shared_memory().TranslateResidentGuestPhysical(key.base_page << 12), base_size);
++  }
++  if (mips_size) {
++    std::memcpy(mips_bytes.data(),
++                shared_memory().TranslateResidentGuestPhysical(key.mip_page << 12), mips_size);
++  }
++  char name[128];
++  std::snprintf(name, sizeof(name), "tex_%04u_%ux%u_fmt%u_%s%s_p%08X.retex", file_index,
++                header.width, header.height, header.format, has_base ? "b" : "",
++                has_mips ? "m" : "", key.base_page << 12);
++  std::ofstream file(std::filesystem::path(dump_dir) / name, std::ios::binary);
++  if (!file) {
++    REXGPU_ERROR("Texture dump: cannot open {} for writing", name);
++    return;
++  }
++  file.write(reinterpret_cast<const char*>(&header), sizeof(header));
++  if (base_size) file.write(reinterpret_cast<const char*>(base_bytes.data()), base_size);
++  if (mips_size) file.write(reinterpret_cast<const char*>(mips_bytes.data()), mips_size);
++}
++
+ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_load) {
+   if (!pending_load.texture || (!pending_load.load_base && !pending_load.load_mips)) {
+     return true;
+@@ -440,6 +572,9 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+     return false;
+   }
+ 
++  // Opt-in offline dump of the guest bytes just uploaded (no-op by default).
++  MaybeDumpGuestTexture(texture, pending_load.load_base, pending_load.load_mips);
++
+   // Mark the ranges as uploaded and watch them. This is needed for scaled
+   // resolves as well to detect when the CPU wants to reuse the memory for a
+   // regular texture or a vertex buffer, and thus the scaled resolve version is
