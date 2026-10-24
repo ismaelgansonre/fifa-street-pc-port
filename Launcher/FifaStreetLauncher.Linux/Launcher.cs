@@ -420,11 +420,15 @@ internal sealed partial class Launcher : IPageHost
             case "logs": Open(Path.Combine(binaries, "Logs")); break;
             case "folder": Open(root); break;
             case "shortcut": CreateDesktopEntry(); break;
+            case "donate": OpenUrl("https://ko-fi.com/samuelitodavila"); break;
             case "perfShare": if (m.TryGetProperty("value", out var ps) && ps.ValueKind is JsonValueKind.True or JsonValueKind.False) { perfShare = ps.GetBoolean(); SaveSettings(); } return;
             case "controls": if (m.TryGetProperty("value", out var cv) && cv.ValueKind == JsonValueKind.Object) SetControls(cv); break;
             case "server": if (m.TryGetProperty("address", out var a)) SwitchServer(a.GetString() ?? ""); break;
             case "social" or "chatSend" or "chatAction" or "friend" or "room":
                 _ = SocialAsync(cmd, m);
+                return;
+            case "comp":
+                _ = CompAsync(m.Clone());
                 return;
             case "updateGo":
                 Post(new { type = "updateError", message = "On Linux, update with the new ReStreet setup (see the README)." });
@@ -485,6 +489,13 @@ internal sealed partial class Launcher : IPageHost
             lastState = json;
         }
         Page.Send(json);
+    }
+
+    // The Donate button: the page in the desktop's browser.
+    private static void OpenUrl(string url)
+    {
+        try { Process.Start(new ProcessStartInfo("xdg-open") { ArgumentList = { url }, UseShellExecute = false }); }
+        catch (System.ComponentModel.Win32Exception ex) { Debug.WriteLine(ex.Message); }  // no xdg-open
     }
 
     private static void Open(string path)

@@ -291,7 +291,7 @@ public partial class LauncherForm
                 string type = Path.GetExtension(file).ToLowerInvariant() switch
                 {
                     ".html" => "text/html; charset=utf-8", ".jpg" => "image/jpeg", ".png" => "image/png",
-                    ".css" => "text/css", ".js" => "text/javascript", _ => "application/octet-stream",
+                    ".css" => "text/css", ".js" => "text/javascript", ".woff2" => "font/woff2", _ => "application/octet-stream",
                 };
                 if (File.Exists(file)) await Respond(stream, 200, type, await File.ReadAllBytesAsync(file));
                 else await Respond(stream, 404, "text/plain", Array.Empty<byte>());

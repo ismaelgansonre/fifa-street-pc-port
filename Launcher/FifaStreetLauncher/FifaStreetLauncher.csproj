@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>2.0.8</Version>
+    <Version>2.1.0</Version>
     <ApplicationIcon>fifastreet.ico</ApplicationIcon>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>

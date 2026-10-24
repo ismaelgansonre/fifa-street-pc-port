@@ -57,6 +57,7 @@ internal sealed partial class Launcher
         string Str(string p) => m.TryGetProperty(p, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
         string channel = Str("channel");
         string? error = null;
+        long passOk = 0;  // the room whose password the server accepted (action 'check')
         try
         {
             if (cmd == "social" && channel == "")
@@ -88,14 +89,24 @@ internal sealed partial class Launcher
                 string action = Str("action");
                 long roomId = m.TryGetProperty("room", out var rv) && rv.ValueKind == JsonValueKind.Number ? rv.GetInt64() : 0;
                 int stadium = m.TryGetProperty("stadium", out var sv2) && sv2.ValueKind == JsonValueKind.Number ? sv2.GetInt32() : 1047;
+                // The team picked for the match (game team id, 0 = own World Tour team); the server checks it.
+                int team = m.TryGetProperty("team", out var tv) && tv.ValueKind == JsonValueKind.Number ? tv.GetInt32() : 0;
+                // Private rooms: the host sets a password, a joiner types it (an invited friend needs none).
+                string password = Str("password").Trim();
                 using var r = action switch
                 {
-                    "create" => await PostJson(server, "/v1/rooms", new { me = name, key, action, name = Str("title").Trim().Length > 0 ? Str("title").Trim() : name + "'s game", mode = Str("mode"), stadium }),
-                    "join" => await PostJson(server, "/v1/rooms", new { me = name, key, action, room = roomId }),
+                    "create" => await PostJson(server, "/v1/rooms", new { me = name, key, action, name = Str("title").Trim().Length > 0 ? Str("title").Trim() : name + "'s game", mode = Str("mode"), stadium, team, password }),
+                    "join" => await PostJson(server, "/v1/rooms", new { me = name, key, action, room = roomId, team, password }),
+                    // The password is checked before the team picker; a server without 'check' answers with the list, so it passes.
+                    "check" => await PostJson(server, "/v1/rooms", new { me = name, key, action, room = roomId, password }),
+                    // A friend invited to this player's room joins it without the password.
+                    "invite" => await PostJson(server, "/v1/rooms", new { me = name, key, action, target = Str("other") }),
+                    "decline" => await PostJson(server, "/v1/rooms", new { me = name, key, action, room = roomId }),
                     _ => await PostJson(server, "/v1/rooms", new { me = name, key, action = "leave" }),
                 };
                 if (r != null && r.RootElement.TryGetProperty("error", out var re)) error = RoomError(re.GetString());
-                else if (action == "create" && r != null && r.RootElement.TryGetProperty("room", out var made))
+                else if (action == "check") { if (r != null) passOk = roomId; else error = "Server not reachable"; }
+                else if (action == "create" && password.Length == 0 && r != null && r.RootElement.TryGetProperty("room", out var made))
                 {
                     // Tell the server channel, so anyone can join from the Open games list.
                     string text = $"🎮 I opened a {RoomModeName(Str("mode"))} game at {made.GetProperty("stadium_name").GetString()}. Join it from the Matches tab!";
@@ -108,6 +119,7 @@ internal sealed partial class Launcher
             var playersTask = GetJson(server, "/v1/online");
             var roomsTask = PostJson(server, "/v1/rooms", new { me = name, key, action = "list" });
             var myRoomTask = PostJson(server, "/v1/rooms", new { me = name, key, action = "current" });
+            var invitesTask = PostJson(server, "/v1/rooms", new { me = name, key, action = "invites" });
             var convosTask = PostJson(server, "/v1/textchat", new { me = name, key, action = "conversations" });
             var msgsTask = channel == "" ? Task.FromResult<JsonDocument?>(null)
                 : PostJson(server, "/v1/textchat", new { me = name, key, action = "read", channel, since = m.TryGetProperty("since", out var s2) && s2.ValueKind == JsonValueKind.Number ? s2.GetInt64() : 0 });
@@ -124,6 +136,7 @@ internal sealed partial class Launcher
             using var players = await playersTask;
             using var rooms = await roomsTask;
             using var myRoom = await myRoomTask;
+            using var invites = await invitesTask;
             var waited = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             if (players.RootElement.TryGetProperty("searching_list", out var sl) && sl.ValueKind == JsonValueKind.Array)
                 foreach (var it in sl.EnumerateArray())
@@ -137,6 +150,7 @@ internal sealed partial class Launcher
                 ["server"] = regionName,
                 ["channel"] = channel,
                 ["error"] = error,
+                ["passOk"] = passOk,
                 ["chatOff"] = chatOff,
                 ["players"] = players.RootElement.TryGetProperty("players", out var pl)
                     ? pl.EnumerateArray().Select(p => new
@@ -159,6 +173,8 @@ internal sealed partial class Launcher
                 payload["rooms"] = JsonSerializer.Deserialize<object>(rl.GetRawText());
             if (myRoom != null && myRoom.RootElement.TryGetProperty("room", out var mr))
                 payload["myRoom"] = JsonSerializer.Deserialize<object>(mr.GetRawText());
+            if (invites != null && invites.RootElement.TryGetProperty("invites", out var il))
+                payload["invites"] = JsonSerializer.Deserialize<object>(il.GetRawText());
             inRoom = myRoom != null && myRoom.RootElement.TryGetProperty("room", out var mr3) && mr3.ValueKind == JsonValueKind.Object;
             OnRoomState(myRoom != null && myRoom.RootElement.TryGetProperty("room", out var mr2) ? mr2.Clone() : null);
             if (friends != null)
@@ -187,6 +203,47 @@ internal sealed partial class Launcher
         }
     }
 
+    // Competitive page (server competitive.py): the page's request goes to /v1/competitive as it is, signed with this
+    // player's name and key; the answer comes back as {type: 'comp', action, data, error}. Same as the Windows GlassUi.
+    private async Task CompAsync(JsonElement m)
+    {
+        var online = LoadOnlineConfig();
+        if (online == null || !toggles["onlineMode"].On || Page == null) return;
+        var (server, name, key) = online.Value;
+        string action = m.TryGetProperty("action", out var av) && av.ValueKind == JsonValueKind.String ? av.GetString() ?? "me" : "me";
+        var body = new Dictionary<string, object?> { ["me"] = name, ["key"] = key, ["action"] = action };
+        foreach (var field in new[] { "mode", "team", "id" })
+            if (m.TryGetProperty(field, out var v)) body[field] = JsonSerializer.Deserialize<object>(v.GetRawText());
+        object? data = null;
+        string? error = null;
+        try
+        {
+            using var r = await PostJson(server, "/v1/competitive", body);
+            if (r == null) error = "Server not reachable";
+            else if (r.RootElement.TryGetProperty("error", out var e)) error = CompError(e.GetString());
+            else data = JsonSerializer.Deserialize<object>(r.RootElement.GetRawText());
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            if (action is "me" or "table" or "tournaments") return;
+            error = "Server not reachable";
+        }
+        Page?.Send(JsonSerializer.Serialize(new { type = "comp", action, data, error }));
+    }
+
+    private static string CompError(string? code) => code switch
+    {
+        "unknown_mode" => "Pick a mode first",
+        "unknown_team" => "The server does not know that team yet",
+        "no_such_tournament" => "That tournament is over",
+        "tournament_started" => "The tournament has already started",
+        "tournament_full" => "The tournament is full",
+        "not_signed_up" => "Sign up first",
+        "checkin_not_open" => "Check-in opens 10 minutes before the start",
+        "unknown_action" or "route_not_found" => "This server does not have competitive play yet",
+        _ => "Could not do that: " + code,
+    };
+
     private static string RoomModeName(string mode) => mode switch
     {
         "fives" => "5-a-side", "sixes" => "6-a-side", "futsal" => "Futsal", _ => mode,
@@ -198,6 +255,10 @@ internal sealed partial class Launcher
         "already_in_room" => "Leave your current game first",
         "too_fast" => "Wait a few seconds before opening another game",
         "no_such_room" or "unknown_room" => "That game is closed",
+        "unknown_team" => "The server does not know that team yet",
+        "wrong_password" => "Wrong password for that game",
+        "not_friends" => "You can only invite your friends",
+        "not_in_room" => "Post a match first, then invite",
         _ => "Could not do that: " + code,
     };
 

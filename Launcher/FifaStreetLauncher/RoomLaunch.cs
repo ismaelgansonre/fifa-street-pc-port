@@ -31,6 +31,13 @@ public partial class LauncherForm
                 catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
                 for (int i = 0; i < 100 && gameRunning; ++i) await Task.Delay(100);  // LaunchGame's finally clears it
             }
+            // The same for a game opened outside the launcher from this install.
+            if (OtherGameFromHere() is { } other)
+            {
+                using var _ = other;  // a killed process stays listed while a handle to it is open
+                try { other.Kill(); await other.WaitForExitAsync(); }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            }
             if (!gameRunning) LaunchGame();
         });
     }

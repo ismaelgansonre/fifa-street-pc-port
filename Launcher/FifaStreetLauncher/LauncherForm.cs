@@ -16,12 +16,12 @@ public partial class LauncherForm : Form, ISceneHost, IUiScaled
 {
     // Until it has finished once: starts the stadium pictures (stadium-thumbs next to the game exe) from the player's own
     // game files, with the bundled tools\ReStreetAssetExplorer.exe, without waiting for it. Nothing from the game ships.
-    // The tool writes stadium-thumbs\.complete2 last (2: placeholder icons skipped + names.json, so older sets are redone),
-    // so an interrupted run is simply started again on the next PLAY.
+    // The tool writes stadium-thumbs\.complete5 last (3: + team crests in crests\; 4: crests at 112 px; 5: wide stadium previews; older sets are redone),
+    // so an interrupted run is simply started again the next time the launcher opens or on PLAY.
     private static void EnsureStadiumThumbs(string exeDir, string gameRoot)
     {
         string folder = Path.Combine(exeDir, "stadium-thumbs");
-        if (File.Exists(Path.Combine(folder, ".complete2"))) return;
+        if (File.Exists(Path.Combine(folder, ".complete5"))) return;
         // A run started from a previous PLAY may still be working on the same folder.
         var running = Process.GetProcessesByName("ReStreetAssetExplorer");
         foreach (var process in running) process.Dispose();
@@ -1104,9 +1104,23 @@ displayModeBox.SelectedIndexChanged += (_, _) => { UpdateRefreshRates(); UpdateS
         }
     }
 
+    // A game from this install that the launcher did not start (opened from the exe): it holds rexruntime.dll, so
+    // starting another one fails with "file in use".
+    private Process? OtherGameFromHere()
+    {
+        string dir = Path.GetDirectoryName(Path.GetFullPath(exePathBox.Text.Trim())) ?? "";
+        foreach (var p in Process.GetProcessesByName("fifastreet"))
+        {
+            try { if (p.Id != gameProcess?.Id && !p.HasExited && string.Equals(Path.GetDirectoryName(p.MainModule?.FileName), dir, StringComparison.OrdinalIgnoreCase)) return p; }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            p.Dispose();
+        }
+        return null;
+    }
+
     private async void LaunchGame()
     {
-        if (gameRunning) {
+        if (gameRunning || OtherGameFromHere() is not null) {
             ShowError("ReStreet is already running.");
             return;
         }
@@ -1169,15 +1183,17 @@ displayModeBox.SelectedIndexChanged += (_, _) => { UpdateRefreshRates(); UpdateS
 
             string executableDirectory = Path.GetDirectoryName(exe)!;
 
-            File.Copy(
-                backendRuntime,
-                Path.Combine(executableDirectory, "rexruntime.dll"),
-                true);
-
-            File.Copy(
-                backendGpu,
-                Path.Combine(executableDirectory, "rexgpu-xenos.dll"),
-                true);
+            // A game that has just been closed (room start) keeps the dlls locked for a moment: retry for up to 5 s.
+            for (int attempt = 0; ; ++attempt)
+            {
+                try
+                {
+                    File.Copy(backendRuntime, Path.Combine(executableDirectory, "rexruntime.dll"), true);
+                    File.Copy(backendGpu, Path.Combine(executableDirectory, "rexgpu-xenos.dll"), true);
+                    break;
+                }
+                catch (IOException) when (attempt < 20) { await Task.Delay(250); }
+            }
 
             var resolution = resolutionBox.Text.Split('x');
             if (resolution.Length != 2 ||
