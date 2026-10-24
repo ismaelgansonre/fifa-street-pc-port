@@ -28,7 +28,7 @@ app.whenReady().then(() => {
     height: Math.max(h || 720, 560),
     minWidth: 900,
     minHeight: 560,
-    title: 'ReStreet Launcher',
+    title: 'Launcher - ReStreet',
     backgroundColor: '#0b0c12',
     autoHideMenuBar: true,
     show: false,
@@ -36,6 +36,7 @@ app.whenReady().then(() => {
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
   win.removeMenu();
+  win.on('page-title-updated', (e) => e.preventDefault());
   win.once('ready-to-show', () => win.show());
 
   // The page never leaves the launcher: no pop-ups, no navigation elsewhere.

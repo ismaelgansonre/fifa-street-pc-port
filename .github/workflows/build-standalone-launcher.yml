@@ -1,15 +1,22 @@
-name: Build launcher
+name: Build Standalone launcher
 
 on:
   workflow_dispatch:
-  push:
-    branches: [old-v2.0.3]
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Point the build at this repository (not committed)
+        shell: pwsh
+        run: |
+          $repo = "${{ github.repository }}"
+          foreach ($f in 'Launcher/FifaStreetLauncher/Updater.cs', 'Launcher/FifaStreetLauncher/ViewerDownload.cs') {
+            (Get-Content $f -Raw).Replace('samuelit0davila/fifa-street-pc-port', $repo) |
+              Set-Content $f -NoNewline -Encoding utf8
+          }
 
       - uses: actions/setup-dotnet@v4
         with:

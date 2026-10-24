@@ -72,7 +72,7 @@ public partial class LauncherForm
     // Shows the window: when the new page has loaded, or when the classic interface is the one that stays.
     private void RevealWindow()
     {
-        if (!browserActive) Opacity = 1;
+        if (!browserActive && !viewerDownloading) Opacity = 1;
     }
 
     private async void InitGlassUi()
@@ -85,6 +85,7 @@ public partial class LauncherForm
         // Wine/Proton: WebView2 is not reliable there, so the same page opens in the system browser.
         if (RunningOnWine() || Environment.GetEnvironmentVariable("RESTREET_BROWSER_UI") == "1")
         {
+            if (RunningOnWine()) await EnsureViewerAsync();  // first run on Proton: fetch the viewer once
             StartBrowserUi();
             if (browserActive) StartPageServices();
             RevealWindow();
