@@ -19,30 +19,10 @@ index d26cd4f..2a03d52 100644
      assert_true(load_shader_index < kLoadShaderCount);
      return load_shader_info_[load_shader_index];
 diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
-index 4d85a2b..b3ea3e8 100644
+index a1b2c3d..b3ea3e8 100644
 --- a/include/rex/graphics/shared_memory.h
 +++ b/include/rex/graphics/shared_memory.h
-@@ -10,6 +10,7 @@
-  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
-  */
- 
-+#include <functional>
- #include <cstdint>
- #include <mutex>
- #include <utility>
-@@ -79,6 +80,11 @@ class SharedMemory {
-   bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
-   bool RequestRange(uint32_t start, uint32_t length);
- 
-+  // Called (from guest threads) with the page range invalidated by a guest write.
-+  void SetInvalidationObserver(std::function<void(uint32_t, uint32_t)> observer) {
-+    invalidation_observer_ = std::move(observer);
-+  }
-+
-   // Marks the range and, if not exact_range, potentially its surroundings
-   // (to up to the first GPU-written page, as an access violation exception
-   // count optimization) as modified by the CPU, also invalidating GPU-written
-@@ -95,6 +101,13 @@ class SharedMemory {
+@@ -100,6 +100,13 @@ class SharedMemory {
    // regions in those pages.
    void RangeWrittenByGpu(uint32_t start, uint32_t length);
  
@@ -56,14 +36,6 @@ index 4d85a2b..b3ea3e8 100644
   protected:
    SharedMemory(memory::Memory& memory);
    // Call in implementation-specific initialization.
-@@ -154,6 +167,7 @@ class SharedMemory {
-   uint32_t host_gpu_memory_sparse_allocations_ = 0;
-   uint32_t host_gpu_memory_sparse_used_bytes_ = 0;
- 
-+  std::function<void(uint32_t, uint32_t)> invalidation_observer_;
-   void* memory_invalidation_callback_handle_ = nullptr;
-   void* memory_data_provider_handle_ = nullptr;
- 
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
 index 76f5600..e2b4d3e 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
